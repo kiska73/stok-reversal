@@ -17,20 +17,22 @@ TELEGRAM_TOKEN   = "6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s"
 TELEGRAM_CHAT_ID = "820279313"
 
 SYMBOL = "ETHUSDT"
-ORDER_VALUE_USDT = 1000          # ← come vuoi tu (leva già impostata manualmente)
+ORDER_VALUE_USDT = 1000
 INTERVAL = "30"
 
-# Indicatori
+# Indicatori (allineati al Pine Script)
 RSI_LENGTH   = 30
 STOCH_LENGTH = 30
 SMOOTH_K     = 27
 SMOOTH_D     = 26
-SLACK        = 1.0
-DIST_MIN     = 0.2
-EMA_LENGTH   = 14
-USE_EMA      = True
-TP_PERCENT   = 8.4
-SL_PERCENT   = 2.4
+
+SLACK    = 1.0
+DIST_MIN = 0.2
+EMA_LENGTH = 14
+USE_EMA  = True
+
+TP_PERCENT = 8.4
+SL_PERCENT = 2.4
 
 # ============================================================
 # CONNESSIONE
@@ -52,10 +54,9 @@ def telegram(msg):
         log(f"Errore Telegram: {e}")
 
 # ====================== AVVIO ======================
-log("=== BOT Stoch RSI Reversal - 1000$ NOTIONAL (NO LEVERAGE TOUCH) ===")
-telegram("🚀 Bot avviato su Render\n"
-         f"ORDER VALUE: {ORDER_VALUE_USDT} USDT | TP 8.4% | SL 2.4%\n"
-         "Leva impostata manualmente su Bybit")
+log("=== BOT Stoch RSI Reversal - DEBUG COMPLETO ATTIVATO ===")
+telegram("🚀 Bot avviato\n"
+         f"TP {TP_PERCENT}% | SL {SL_PERCENT}%")
 
 info = session.get_instruments_info(category="linear", symbol=SYMBOL)["result"]["list"][0]
 MIN_QTY   = float(info["lotSizeFilter"]["minOrderQty"])
@@ -101,7 +102,7 @@ def bybit_request(func, *args, max_retries=15, **kwargs):
     return None
 
 # ============================================================
-# APERTURA (TP/SL in una sola chiamata)
+# APERTURA POSIZIONE (TP/SL in una sola chiamata)
 # ============================================================
 
 def open_position_market(side):
@@ -116,7 +117,6 @@ def open_position_market(side):
 
         qty_str = str(qty).rstrip("0").rstrip(".")
 
-        # TP/SL
         tp = price * (1 + TP_PERCENT/100) if side == "Buy" else price * (1 - TP_PERCENT/100)
         sl = price * (1 - SL_PERCENT/100) if side == "Buy" else price * (1 + SL_PERCENT/100)
         tp = round(tp / TICK_SIZE) * TICK_SIZE
@@ -137,29 +137,29 @@ def open_position_market(side):
             "slTriggerBy": "LastPrice"
         }
 
-        log(f"📤 Parametri inviati: {order_params}")
+        log(f"📤 Parametri inviati a Bybit: {order_params}")
 
         order = bybit_request(session.place_order, **order_params)
 
         if not order or order.get("retCode") != 0:
             ret_code = order.get("retCode") if order else "None"
             ret_msg = order.get("retMsg", "No message") if order else "place_order returned None"
-            log(f"❌ Rifiutato → retCode={ret_code} | retMsg={ret_msg}")
+            log(f"❌ Bybit rifiutato → retCode={ret_code} | retMsg={ret_msg}")
             telegram(f"❌ Ordine rifiutato\nretCode: {ret_code}\n{ret_msg}")
             return False
 
-        log(f"✅ POSIZIONE APERTA! OrderId: {order['result']['orderId']}")
+        log(f"✅ POSIZIONE APERTA CON SUCCESSO! OrderId: {order['result']['orderId']}")
         telegram(f"🟢 NUOVA POSIZIONE {side.upper()}\nQty: {qty_str} @ {price:.2f}\nTP: {tp:.2f} | SL: {sl:.2f}")
         return True
 
     except Exception as e:
-        log(f"❌ Eccezione apertura: {e}")
+        log(f"❌ Eccezione durante apertura: {e}")
         telegram(f"❌ Eccezione apertura:\n{e}")
         traceback.print_exc()
         return False
 
 # ============================================================
-# INDICATORI E SEGNALI (invariati)
+# INDICATORI E SEGNALE CON DEBUG DETTAGLIATO
 # ============================================================
 
 def get_df():
@@ -183,20 +183,27 @@ def rsi(series, length):
 
 def get_signal(df):
     if df is None or len(df) < 100:
+        log("❌ get_signal: df troppo piccolo o None")
         return False, False, False, False
 
     r = rsi(df["close"], RSI_LENGTH)
     low_r  = r.rolling(STOCH_LENGTH).min()
     high_r = r.rolling(STOCH_LENGTH).max()
     stoch = 100 * (r - low_r) / (high_r - low_r + 1e-10)
+
     k = stoch.rolling(SMOOTH_K).mean()
     d = k.rolling(SMOOTH_D).mean()
     ema = df["close"].ewm(span=EMA_LENGTH, adjust=False).mean()
 
     k_now, k_prev = k.iloc[-1], k.iloc[-2]
     d_now, d_prev = d.iloc[-1], d.iloc[-2]
-    price = df["close"].iloc[-1]
+    price     = df["close"].iloc[-1]
     ema_price = ema.iloc[-1]
+
+    # === DEBUG DETTAGLIATO DEL SEGNALE ===
+    log(f"DEBUG SIGNAL | k_now={k_now:.4f}  k_prev={k_prev:.4f}  |  d_now={d_now:.4f}  d_prev={d_prev:.4f}")
+    log(f"DEBUG SIGNAL | Distanza cross = {abs(k_prev - d_prev):.4f}  (min richiesta: {DIST_MIN})")
+    log(f"DEBUG SIGNAL | EMA check → Price={price:.2f}  EMA={ema_price:.2f}  → Bull ok: {price > ema_price}  |  Bear ok: {price < ema_price}")
 
     bull_cross = (k_now > d_now) and (k_prev <= d_prev + SLACK) and abs(k_prev - d_prev) >= DIST_MIN
     bear_cross = (k_now < d_now) and (k_prev >= d_prev - SLACK) and abs(k_prev - d_prev) >= DIST_MIN
@@ -204,7 +211,16 @@ def get_signal(df):
     ema_bull_ok = (not USE_EMA) or (price > ema_price)
     ema_bear_ok = (not USE_EMA) or (price < ema_price)
 
-    return bull_cross and ema_bull_ok, bear_cross and ema_bear_ok, bear_cross, bull_cross
+    entry_long  = bull_cross and ema_bull_ok
+    entry_short = bear_cross and ema_bear_ok
+
+    log(f"✅ SEGNALE FINALE → entry_long={entry_long}  |  entry_short={entry_short}  |  bear_cross={bear_cross}  |  ema_bear_ok={ema_bear_ok}")
+
+    return entry_long, entry_short, bear_cross, bull_cross
+
+# ============================================================
+# POSIZIONE + CHIUSURA + ATTESA
+# ============================================================
 
 def get_current_position():
     try:
@@ -214,8 +230,7 @@ def get_current_position():
         p = pos["result"]["list"][0]
         size = float(p.get("size", 0))
         side = p.get("side") if size != 0 else None
-        entry = float(p.get("avgPrice", 0)) if size != 0 else 0.0
-        return side, size, entry
+        return side, size, float(p.get("avgPrice", 0))
     except:
         return None, 0.0, 0.0
 
@@ -225,7 +240,7 @@ def close_position_market(reason=""):
         return False
     close_side = "Sell" if side == "Buy" else "Buy"
     qty_str = str(abs(size)).rstrip("0").rstrip(".")
-    log(f"🔴 CHIUSURA {close_side} {qty_str} | {reason}")
+    log(f"🔴 CHIUSURA MARKET {close_side} {qty_str} | Motivo: {reason}")
     telegram(f"🔴 POSIZIONE CHIUSA\n{close_side} {qty_str}\nMotivo: {reason}")
     bybit_request(session.place_order, category="linear", symbol=SYMBOL,
                   side=close_side, orderType="Market", qty=qty_str, reduceOnly=True)
@@ -243,19 +258,31 @@ def wait_next_candle():
     next_run += timedelta(seconds=20)
     sleep_time = (next_run - datetime.now(UTC)).total_seconds()
     if sleep_time > 0:
-        log(f"⏳ Attesa prossima candela tra {int(sleep_time)}s...")
+        log(f"⏳ Attesa prossima candela 30m tra {int(sleep_time)} secondi...")
         time.sleep(sleep_time)
+
+# ============================================================
+# MAIN LOOP (con debug extra)
+# ============================================================
 
 def main_loop():
     side, size, _ = get_current_position()
     df = get_df()
     if df is None:
-        log("Errore download klines")
+        log("❌ Errore: impossibile scaricare i dati delle candele")
         return
 
     entry_long, entry_short, exit_long, exit_short = get_signal(df)
+
     pos_str = side if side else "FLAT"
-    log(f"Segnali → Long:{entry_long} Short:{entry_short} | Exit L:{exit_long} S:{exit_short} | Pos: {pos_str} (size={size})")
+    log(f"Segnali → L:{entry_long} S:{entry_short} | Exit L:{exit_long} S:{exit_short} | Pos: {pos_str} (size={size})")
+
+    # === DEBUG EXTRA PER CAPIRE PERCHÉ NON APRE ===
+    if entry_short:
+        if size == 0:
+            log("🔥 CONDIZIONE SHORT SODDISFATTA + POSIZIONE FLAT → DOVREBBE APRIRE ORA!")
+        else:
+            log(f"⚠️ Segnale SHORT presente ma posizione ancora aperta (size={size}) → skip apertura")
 
     if side == "Buy" and exit_long:
         close_position_market("Bear cross")
@@ -263,6 +290,7 @@ def main_loop():
         if entry_short:
             open_position_market("Sell")
         return
+
     if side == "Sell" and exit_short:
         close_position_market("Bull cross")
         time.sleep(2)
@@ -275,8 +303,9 @@ def main_loop():
             open_position_market("Buy")
         elif entry_short:
             open_position_market("Sell")
+        return
 
-    log("Nessuna azione")
+    log("Nessuna azione da eseguire")
 
 # ============================================================
 # START
@@ -285,6 +314,7 @@ def main_loop():
 if __name__ == "__main__":
     time.sleep(5)
     main_loop()
+
     while True:
         try:
             wait_next_candle()
@@ -295,6 +325,6 @@ if __name__ == "__main__":
             break
         except Exception as e:
             log(f"ERRORE CRITICO: {e}")
-            telegram(f"⚠️ ERRORE CRITICO:\n{e}")
+            telegram(f"⚠️ ERRORE CRITICO nel bot:\n{e}")
             traceback.print_exc()
             time.sleep(60)
