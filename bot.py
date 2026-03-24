@@ -11,6 +11,7 @@ import random
 # CONFIGURAZIONE
 # ============================================================
 
+# 🚨 INSERISCI QUI LE TUE NUOVE CHIAVI (NON USARE QUELLE VECCHIE)
 API_KEY          = "26tNwg57oCDvlNidYT"
 API_SECRET       = "WQ84S2dhZ9FVoXkJ7WqWCt6F7HSXR4fsrqhH"
 TELEGRAM_TOKEN   = "6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s"
@@ -35,7 +36,7 @@ TP_PERCENT = 8.4
 SL_PERCENT = 2.4
 
 # ============================================================
-# CONNESSIONE
+# CONNESSIONE E LOG UTILS
 # ============================================================
 
 session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET, recv_window=30000)
@@ -115,12 +116,23 @@ def open_position_market(side):
             telegram("❌ Qty = 0 → ordine annullato")
             return False
 
-        qty_str = str(qty).rstrip("0").rstrip(".")
+        # Formattazione sicura della quantità
+        qty_str = f"{qty:g}"
 
-        tp = price * (1 + TP_PERCENT/100) if side == "Buy" else price * (1 - TP_PERCENT/100)
-        sl = price * (1 - SL_PERCENT/100) if side == "Buy" else price * (1 + SL_PERCENT/100)
-        tp = round(tp / TICK_SIZE) * TICK_SIZE
-        sl = round(sl / TICK_SIZE) * TICK_SIZE
+        # Calcolo TP e SL grezzi
+        tp_raw = price * (1 + TP_PERCENT/100) if side == "Buy" else price * (1 - TP_PERCENT/100)
+        sl_raw = price * (1 - SL_PERCENT/100) if side == "Buy" else price * (1 + SL_PERCENT/100)
+        
+        # Calcolo decimali richiesti dal TICK_SIZE
+        decimals = len(str(TICK_SIZE).split('.')[1]) if '.' in str(TICK_SIZE) else 0
+        
+        # Arrotondamento ai tick size
+        tp = round(tp_raw / TICK_SIZE) * TICK_SIZE
+        sl = round(sl_raw / TICK_SIZE) * TICK_SIZE
+        
+        # Formattazione stringhe con i decimali esatti
+        tp_str = f"{tp:.{decimals}f}"
+        sl_str = f"{sl:.{decimals}f}"
 
         log(f"🟢 Tentativo apertura {side.upper()} | Prezzo {price:.2f} | Qty {qty_str}")
 
@@ -130,11 +142,12 @@ def open_position_market(side):
             "side": side,
             "orderType": "Market",
             "qty": qty_str,
-            "takeProfit": str(tp),
-            "stopLoss": str(sl),
+            "takeProfit": tp_str,
+            "stopLoss": sl_str,
             "tpslMode": "Full",
             "tpTriggerBy": "LastPrice",
-            "slTriggerBy": "LastPrice"
+            "slTriggerBy": "LastPrice",
+            "positionIdx": 0  # Fondamentale per la modalità One-Way
         }
 
         log(f"📤 Parametri inviati a Bybit: {order_params}")
@@ -159,7 +172,7 @@ def open_position_market(side):
         return False
 
 # ============================================================
-# INDICATORI E SEGNALE CON DEBUG DETTAGLIATO
+# INDICATORI E SEGNALE
 # ============================================================
 
 def get_df():
@@ -200,7 +213,6 @@ def get_signal(df):
     price     = df["close"].iloc[-1]
     ema_price = ema.iloc[-1]
 
-    # === DEBUG DETTAGLIATO DEL SEGNALE ===
     log(f"DEBUG SIGNAL | k_now={k_now:.4f}  k_prev={k_prev:.4f}  |  d_now={d_now:.4f}  d_prev={d_prev:.4f}")
     log(f"DEBUG SIGNAL | Distanza cross = {abs(k_prev - d_prev):.4f}  (min richiesta: {DIST_MIN})")
     log(f"DEBUG SIGNAL | EMA check → Price={price:.2f}  EMA={ema_price:.2f}  → Bull ok: {price > ema_price}  |  Bear ok: {price < ema_price}")
@@ -239,11 +251,16 @@ def close_position_market(reason=""):
     if not side or size == 0:
         return False
     close_side = "Sell" if side == "Buy" else "Buy"
-    qty_str = str(abs(size)).rstrip("0").rstrip(".")
+    
+    # Formattazione sicura
+    qty_str = f"{abs(size):g}"
+    
     log(f"🔴 CHIUSURA MARKET {close_side} {qty_str} | Motivo: {reason}")
     telegram(f"🔴 POSIZIONE CHIUSA\n{close_side} {qty_str}\nMotivo: {reason}")
+    
     bybit_request(session.place_order, category="linear", symbol=SYMBOL,
-                  side=close_side, orderType="Market", qty=qty_str, reduceOnly=True)
+                  side=close_side, orderType="Market", qty=qty_str, reduceOnly=True,
+                  positionIdx=0) # Fondamentale per la modalità One-Way
     time.sleep(2)
     return True
 
@@ -262,7 +279,7 @@ def wait_next_candle():
         time.sleep(sleep_time)
 
 # ============================================================
-# MAIN LOOP (con debug extra)
+# MAIN LOOP
 # ============================================================
 
 def main_loop():
@@ -277,7 +294,6 @@ def main_loop():
     pos_str = side if side else "FLAT"
     log(f"Segnali → L:{entry_long} S:{entry_short} | Exit L:{exit_long} S:{exit_short} | Pos: {pos_str} (size={size})")
 
-    # === DEBUG EXTRA PER CAPIRE PERCHÉ NON APRE ===
     if entry_short:
         if size == 0:
             log("🔥 CONDIZIONE SHORT SODDISFATTA + POSIZIONE FLAT → DOVREBBE APRIRE ORA!")
