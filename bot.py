@@ -11,7 +11,6 @@ import random
 # CONFIGURAZIONE
 # ============================================================
 
-# 🚨 INSERISCI QUI LE TUE NUOVE CHIAVI (NON USARE QUELLE VECCHIE)
 API_KEY          = "26tNwg57oCDvlNidYT"
 API_SECRET       = "WQ84S2dhZ9FVoXkJ7WqWCt6F7HSXR4fsrqhH"
 TELEGRAM_TOKEN   = "6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s"
@@ -36,7 +35,7 @@ TP_PERCENT = 8.4
 SL_PERCENT = 2.4
 
 # ============================================================
-# CONNESSIONE E LOG UTILS
+# CONNESSIONE
 # ============================================================
 
 session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET, recv_window=30000)
@@ -56,8 +55,8 @@ def telegram(msg):
 
 # ====================== AVVIO ======================
 log("=== BOT Stoch RSI Reversal - DEBUG COMPLETO ATTIVATO ===")
-telegram("🚀 Bot avviato\n"
-         f"TP {TP_PERCENT}% | SL {SL_PERCENT}%")
+telegram("🚀 Bot avviato su Render (DEBUG COMPLETO)\n"
+         f"ORDER VALUE: {ORDER_VALUE_USDT} USDT | TP {TP_PERCENT}% | SL {SL_PERCENT}%")
 
 info = session.get_instruments_info(category="linear", symbol=SYMBOL)["result"]["list"][0]
 MIN_QTY   = float(info["lotSizeFilter"]["minOrderQty"])
@@ -116,21 +115,15 @@ def open_position_market(side):
             telegram("❌ Qty = 0 → ordine annullato")
             return False
 
-        # Formattazione sicura della quantità
         qty_str = f"{qty:g}"
 
-        # Calcolo TP e SL grezzi
         tp_raw = price * (1 + TP_PERCENT/100) if side == "Buy" else price * (1 - TP_PERCENT/100)
         sl_raw = price * (1 - SL_PERCENT/100) if side == "Buy" else price * (1 + SL_PERCENT/100)
-        
-        # Calcolo decimali richiesti dal TICK_SIZE
+
         decimals = len(str(TICK_SIZE).split('.')[1]) if '.' in str(TICK_SIZE) else 0
-        
-        # Arrotondamento ai tick size
         tp = round(tp_raw / TICK_SIZE) * TICK_SIZE
         sl = round(sl_raw / TICK_SIZE) * TICK_SIZE
-        
-        # Formattazione stringhe con i decimali esatti
+
         tp_str = f"{tp:.{decimals}f}"
         sl_str = f"{sl:.{decimals}f}"
 
@@ -147,7 +140,7 @@ def open_position_market(side):
             "tpslMode": "Full",
             "tpTriggerBy": "LastPrice",
             "slTriggerBy": "LastPrice",
-            "positionIdx": 0  # Fondamentale per la modalità One-Way
+            "positionIdx": 0
         }
 
         log(f"📤 Parametri inviati a Bybit: {order_params}")
@@ -172,7 +165,7 @@ def open_position_market(side):
         return False
 
 # ============================================================
-# INDICATORI E SEGNALE
+# INDICATORI E SEGNALE CON DEBUG DETTAGLIATO
 # ============================================================
 
 def get_df():
@@ -230,10 +223,6 @@ def get_signal(df):
 
     return entry_long, entry_short, bear_cross, bull_cross
 
-# ============================================================
-# POSIZIONE + CHIUSURA + ATTESA
-# ============================================================
-
 def get_current_position():
     try:
         pos = bybit_request(session.get_positions, category="linear", symbol=SYMBOL)
@@ -251,8 +240,6 @@ def close_position_market(reason=""):
     if not side or size == 0:
         return False
     close_side = "Sell" if side == "Buy" else "Buy"
-    
-    # Formattazione sicura
     qty_str = f"{abs(size):g}"
     
     log(f"🔴 CHIUSURA MARKET {close_side} {qty_str} | Motivo: {reason}")
@@ -260,7 +247,7 @@ def close_position_market(reason=""):
     
     bybit_request(session.place_order, category="linear", symbol=SYMBOL,
                   side=close_side, orderType="Market", qty=qty_str, reduceOnly=True,
-                  positionIdx=0) # Fondamentale per la modalità One-Way
+                  positionIdx=0)
     time.sleep(2)
     return True
 
