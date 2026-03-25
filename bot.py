@@ -19,7 +19,7 @@ TELEGRAM_CHAT_ID = "820279313"
 
 SYMBOL = "ETHUSDT"
 ORDER_VALUE_USDT = 1000
-INTERVAL = "30"                     # 30 minuti
+INTERVAL = "30"
 
 RSI_LENGTH   = 30
 STOCH_LENGTH = 30
@@ -51,12 +51,12 @@ def telegram(msg):
 # ====================== SESSIONE BYBIT ======================
 # ============================================================
 
-log("=== BOT AVVIATO - MODALITÀ SOLDI VERI ===")
-telegram("⚠️ BOT avviato in MODALITÀ SOLDI VERI su ETHUSDT - Una posizione alla volta")
+log("=== BOT AVVIATO - MODALITÀ SOLDI VERI CON INVERSIONI ===")
+telegram("⚠️ BOT avviato - Modalità SOLDI VERI con gestione inversioni")
 
 session = HTTP(
     testnet=False,
-    demo=False,          # False = soldi veri
+    demo=False,
     api_key=API_KEY,
     api_secret=API_SECRET,
     recv_window=30000
@@ -67,6 +67,7 @@ session = HTTP(
 # ============================================================
 
 info = session.get_instruments_info(category="linear", symbol=SYMBOL)["result"]["list"][0]
+
 MIN_QTY   = float(info["lotSizeFilter"]["minOrderQty"])
 QTY_STEP  = float(info["lotSizeFilter"]["qtyStep"])
 TICK_SIZE = float(info["priceFilter"]["tickSize"])
@@ -103,21 +104,22 @@ def bybit_request(func, *args, max_retries=8, **kwargs):
             time.sleep(wait)
     return None
 
-def has_open_position():
-    """Restituisce True se c'è già una posizione aperta su ETHUSDT"""
+def get_current_position():
+    """Restituisce ('Buy', qty) o ('Sell', qty) o (None, 0)"""
     try:
         pos = bybit_request(session.get_positions, category="linear", symbol=SYMBOL)
         if not pos:
-            return False
+            return None, 0.0
         for p in pos["result"]["list"]:
             size = float(p.get("size", 0))
-            if size != 0:
-                side = p.get("side", "")
-                log(f"📍 Posizione aperta rilevata: {side} size={size}")
-                return True
-        return False
-    except:
-        return False
+            if size > 0:
+                side = p.get("side")  # "Buy" o "Sell"
+                log(f"📍 Posizione aperta: {side} | size = {size}")
+                return side, size
+        return None, 0.0
+    except Exception as e:
+        log(f"Errore lettura posizione: {e}")
+        return None, 0.0
 
 # ============================================================
 # ====================== INDICATORI ==========================
@@ -152,63 +154,94 @@ def get_signal(df):
     d = k.rolling(SMOOTH_D).mean()
     ema = df["close"].ewm(span=EMA_LENGTH).mean()
 
-    price = df["close"].iloc[-1]
-    ema_price = ema.iloc[-1]
-
-    # Segnale crossover + possibilità sulle candele successive (ultime 3 candele)
-    bull = False
-    bear = False
-    for i in range(1, 4):   # controlla le ultime 3 candele
+    for i in range(1, 4):   # ultime 3 candele
         if i >= len(k): break
         k_now, k_prev = k.iloc[-i], k.iloc[-i-1]
         d_now, d_prev = d.iloc[-i], d.iloc[-i-1]
-        p = df["close"].iloc[-i]
-        e = ema.iloc[-i]
+        price = df["close"].iloc[-i]
+        ema_price = ema.iloc[-i]
 
         cross_bull = (k_now > d_now) and (k_prev <= d_prev)
         cross_bear = (k_now < d_now) and (k_prev >= d_prev)
 
         if USE_EMA:
-            cross_bull = cross_bull and (p > e)
-            cross_bear = cross_bear and (p < e)
+            cross_bull = cross_bull and (price > ema_price)
+            cross_bear = cross_bear and (price < ema_price)
 
         if cross_bull:
-            bull = True
+            return True, False
         if cross_bear:
-            bear = True
+            return False, True
 
-    return bull, bear
+    return False, False
+
+# ============================================================
+# ====================== CHIUSURA POSIZIONE ==================
+# ============================================================
+
+def close_position(side, qty):
+    """Chiude la posizione corrente inviando un ordine market nella direzione opposta"""
+    try:
+        close_side = "Sell" if side == "Buy" else "Buy"
+        qty_str = f"{qty:.{QTY_DECIMALS}f}"
+
+        log(f"🔄 Chiusura posizione {side} → invio ordine {close_side} {qty_str}")
+
+        order = bybit_request(
+            session.place_order,
+            category="linear",
+            symbol=SYMBOL,
+            side=close_side,
+            orderType="Market",
+            qty=qty_str,
+            positionIdx=0,
+            reduceOnly=True
+        )
+
+        if order:
+            log(f"✅ Posizione {side} chiusa con successo")
+            telegram(f"🔴 Chiusa posizione {side} | Aperto {close_side}")
+            return True
+        return False
+    except Exception as e:
+        log(f"❌ Errore chiusura posizione: {e}")
+        return False
 
 # ============================================================
 # ====================== APERTURA POSIZIONE ==================
 # ============================================================
 
 def open_position_market(side):
-    if has_open_position():
-        log("⛔ C'è già una posizione aperta → non apro nuova")
-        return False
-
     try:
         ticker = bybit_request(session.get_tickers, category="linear", symbol=SYMBOL)
         price = float(ticker["result"]["list"][0]["lastPrice"])
         qty = calc_qty(price)
-        if qty <= 0: return False
+        if qty <= 0:
+            return False
 
         qty_str = f"{qty:.{QTY_DECIMALS}f}"
         tp = round(price * (1 + TP_PERCENT/100 if side == "Buy" else 1 - TP_PERCENT/100) / TICK_SIZE) * TICK_SIZE
         sl = round(price * (1 - SL_PERCENT/100 if side == "Buy" else 1 + SL_PERCENT/100) / TICK_SIZE) * TICK_SIZE
 
-        log(f"📤 Invio ordine REAL → {side} {qty_str} @ mercato")
+        log(f"📤 Apertura nuova posizione → {side} {qty_str}")
 
         order = bybit_request(
             session.place_order,
-            category="linear", symbol=SYMBOL, side=side, orderType="Market", qty=qty_str,
-            takeProfit=f"{tp:.{PRICE_DECIMALS}f}", stopLoss=f"{sl:.{PRICE_DECIMALS}f}",
-            tpslMode="Full", tpTriggerBy="LastPrice", slTriggerBy="LastPrice", positionIdx=0
+            category="linear",
+            symbol=SYMBOL,
+            side=side,
+            orderType="Market",
+            qty=qty_str,
+            takeProfit=f"{tp:.{PRICE_DECIMALS}f}",
+            stopLoss=f"{sl:.{PRICE_DECIMALS}f}",
+            tpslMode="Full",
+            tpTriggerBy="LastPrice",
+            slTriggerBy="LastPrice",
+            positionIdx=0
         )
 
         if order:
-            log(f"✅ ORDINE ESEGUITO → {side} {qty_str}")
+            log(f"✅ Posizione {side} aperta con successo")
             telegram(f"🟢 {side.upper()} {qty_str} ETHUSDT @ {price:.2f} (TP {TP_PERCENT}% | SL {SL_PERCENT}%)")
             return True
         return False
@@ -217,23 +250,19 @@ def open_position_market(side):
         return False
 
 # ============================================================
-# ====================== TIMING CANDela 30m +20s =============
+# ====================== TIMING CANDELA ======================
 # ============================================================
 
 def wait_for_next_candle():
-    """Aspetta esattamente la chiusura della prossima candela 30m + 20 secondi"""
     now = datetime.now(UTC)
-    # Prossima chiusura candela 30m
-    minutes = (now.minute // 30) * 30 + 30
-    next_candle = now.replace(minute=minutes % 60, second=0, microsecond=0)
-    if minutes >= 60:
-        next_candle += timedelta(hours=1)
+    if now.minute < 30:
+        next_candle = now.replace(minute=30, second=0, microsecond=0)
+    else:
+        next_candle = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-    wait_seconds = (next_candle - now).total_seconds() + 20  # +20 secondi di sicurezza
-    if wait_seconds < 0:
-        wait_seconds += 1800  # sicurezza
-
-    log(f"⏳ Aspetto chiusura candela 30m +20s → sleep {wait_seconds/60:.1f} minuti")
+    wait_seconds = (next_candle - now).total_seconds() + 20
+    next_time_str = next_candle.strftime('%H:%M:%S')
+    log(f"⏳ Prossima scansione alle {next_time_str} UTC (+20s) → attesa {wait_seconds:.0f}s")
     time.sleep(wait_seconds)
 
 # ============================================================
@@ -241,11 +270,11 @@ def wait_for_next_candle():
 # ============================================================
 
 if __name__ == "__main__":
-    log("=== BOT IN ESECUZIONE - Scan ogni chiusura 30m +20s ===")
+    log("=== BOT IN ESECUZIONE - Gestione inversioni attiva ===")
 
     while True:
         try:
-            wait_for_next_candle()          # Aspetta chiusura candela +20s
+            wait_for_next_candle()
 
             df = get_df()
             if df is None or len(df) < 50:
@@ -253,18 +282,35 @@ if __name__ == "__main__":
                 continue
 
             long_sig, short_sig = get_signal(df)
+            current_side, current_qty = get_current_position()
 
-            if long_sig and not has_open_position():
-                log("🟢 Segnale LONG valido → apro posizione")
-                open_position_market("Buy")
-            elif short_sig and not has_open_position():
-                log("🔴 Segnale SHORT valido → apro posizione")
-                open_position_market("Sell")
-            else:
-                if has_open_position():
-                    log("📍 Posizione aperta → tengo (TP/SL gestiti da Bybit)")
+            if current_side is None:
+                # Nessuna posizione → apri normalmente
+                if long_sig:
+                    log("🟢 Segnale LONG → nessuna posizione → APERTURA")
+                    open_position_market("Buy")
+                elif short_sig:
+                    log("🔴 Segnale SHORT → nessuna posizione → APERTURA")
+                    open_position_market("Sell")
                 else:
-                    log("⏳ Nessun segnale valido")
+                    log("⏳ Nessun segnale")
+
+            else:
+                # C'è già una posizione → gestisci inversione
+                if (current_side == "Buy" and short_sig):
+                    log("🔄 Inversione rilevata: LONG → SHORT")
+                    telegram("🔄 Inversione LONG → SHORT")
+                    if close_position(current_side, current_qty):
+                        open_position_market("Sell")
+
+                elif (current_side == "Sell" and long_sig):
+                    log("🔄 Inversione rilevata: SHORT → LONG")
+                    telegram("🔄 Inversione SHORT → LONG")
+                    if close_position(current_side, current_qty):
+                        open_position_market("Buy")
+
+                else:
+                    log(f"📍 Posizione {current_side} confermata → nessun segnale opposto")
 
         except Exception as e:
             log(f"CRASH: {e}")
