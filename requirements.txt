@@ -1,3 +1,5 @@
 pandas
+pandas_ta
 pybit
 requests
+python-dotenv
