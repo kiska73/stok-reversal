@@ -1,17 +1,15 @@
 import time
 import pandas as pd
 import pandas_ta as ta
-import math
 import requests
 from datetime import datetime, UTC
 from pybit.unified_trading import HTTP
 
 # ============================================================
-# CONFIGURAZIONE (API IN CHIARO COME RICHIESTO)
+# CONFIGURAZIONE API
 # ============================================================
 API_KEY      = "26tNwg57oCDvlNidYT"
 API_SECRET   = "WQ84S2dhZ9FVoXkJ7WqWCt6F7HSXR4fsrqhH"
-
 TELEGRAM_TOKEN   = "6916198243:AAFTF66uLYSeqviL5YnfGtbUkSjTwPzah6s"
 TELEGRAM_CHAT_ID = "820279313"
 
@@ -19,25 +17,22 @@ SYMBOL = "ETHUSDT"
 ORDER_VALUE_USDT = 1000
 INTERVAL = "30"
 
-# Parametri Strategia (TradingView)
+# Parametri Pine Script
 RSI_LEN, STOCH_LEN, K_SMOOTH, D_SMOOTH = 30, 30, 27, 26
+SLACK, DIST_MIN = 1.0, 0.2
 EMA_LEN = 14
-TP_PERCENT = 8.4
-SL_PERCENT = 2.4
+TP_PERCENT, SL_PERCENT = 8.4, 2.4
 
-# ============================================================
-# SESSIONE E UTILS
-# ============================================================
 session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET)
 
 def log(msg):
-    ts = datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')
+    ts = datetime.now(UTC).strftime('%H:%M:%S')
     print(f"{ts} | {msg}")
 
 def telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
     except: pass
 
 def get_instrument_info():
@@ -47,96 +42,88 @@ def get_instrument_info():
 TICK_SIZE, QTY_STEP = get_instrument_info()
 
 # ============================================================
-# LOGICA SEGNALE
+# LOGICA SEGNALE & POSIZIONE
 # ============================================================
 def get_signal():
     try:
-        klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=100)
+        klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=150)
         df = pd.DataFrame(klines["result"]["list"], columns=["ts","open","high","low","close","vol","turnover"])
-        df[["open","high","low","close"]] = df[["open","high","low","close"]].astype(float)
+        df["close"] = df["close"].astype(float)
         df = df[::-1].reset_index(drop=True)
 
-        # Calcolo Stoch RSI (Metodo preciso pandas_ta)
-        stoch_rsi = ta.stochrsi(df["close"], length=RSI_LEN, rsi_length=RSI_LEN, k=K_SMOOTH, d=D_SMOOTH)
-        k_col = f"STOCHRSIk_{RSI_LEN}_{RSI_LEN}_{K_SMOOTH}_{D_SMOOTH}"
-        d_col = f"STOCHRSId_{RSI_LEN}_{RSI_LEN}_{K_SMOOTH}_{D_SMOOTH}"
+        rsi_val = ta.rsi(df["close"], length=RSI_LEN)
+        l, h = rsi_val.rolling(STOCH_LEN).min(), rsi_val.rolling(STOCH_LEN).max()
+        stoch_rsi = (rsi_val - l) / (h - l + 1e-10) * 100
+        k = ta.sma(stoch_rsi, length=K_SMOOTH)
+        d = ta.sma(k, length=D_SMOOTH)
+        ema = ta.ema(df["close"], length=EMA_LEN)
+
+        k_n, k_p = k.iloc[-1], k.iloc[-2]
+        d_n, d_p = d.iloc[-1], d.iloc[-2]
+        p_n, e_n = df["close"].iloc[-1], ema.iloc[-1]
+
+        bull = k_n > d_n and k_p <= (d_p + SLACK) and abs(k_p - d_p) >= DIST_MIN and p_n > e_n
+        bear = k_n < d_n and k_p >= (d_p - SLACK) and abs(k_p - d_p) >= DIST_MIN and p_n < e_n
         
-        last_k = stoch_rsi[k_col].iloc[-1]
-        last_d = stoch_rsi[d_col].iloc[-1]
-        last_close = df["close"].iloc[-1]
-        last_ema = ta.ema(df["close"], length=EMA_LEN).iloc[-1]
-
-        log(f"Analisi: Prezzo {last_close:.2f} | EMA {last_ema:.2f} | K {last_k:.2f} | D {last_d:.2f}")
-
-        # Segnale: Lo stocastico deve essere incrociato E il prezzo deve essere dalla parte giusta dell'EMA
-        long_sig = (last_k > last_d) and (last_close > last_ema)
-        short_sig = (last_k < last_d) and (last_close < last_ema)
-
-        return long_sig, short_sig, last_close
+        return bull, bear, p_n
     except Exception as e:
-        log(f"Errore calcolo segnale: {e}")
+        log(f"Errore segnale: {e}")
         return False, False, 0
+
+def get_pos_detail():
+    """Restituisce Side, Qty, EntryPrice"""
+    res = session.get_positions(category="linear", symbol=SYMBOL)["result"]["list"]
+    for p in res:
+        size = float(p.get("size", 0))
+        if size > 0: return p["side"], size, float(p["avgPrice"])
+    return None, 0, 0
 
 # ============================================================
 # ESECUZIONE ORDINI
 # ============================================================
-def get_current_position():
-    pos = session.get_positions(category="linear", symbol=SYMBOL)["result"]["list"]
-    for p in pos:
-        size = float(p.get("size", 0))
-        if size > 0: return p["side"], size
-    return None, 0
+def execute_trade(side, price, old_side=None, old_qty=0, old_entry=0):
+    # 1. Calcolo PNL se chiudiamo una posizione esistente
+    if old_side and old_qty > 0:
+        pnl = (price - old_entry) * old_qty if old_side == "Buy" else (old_entry - price) * old_qty
+        emoji = "💰" if pnl > 0 else "📉"
+        session.place_order(category="linear", symbol=SYMBOL, side="Sell" if old_side=="Buy" else "Buy", 
+                            orderType="Market", qty=str(old_qty), reduceOnly=True)
+        telegram(f"{emoji} *CHIUSO {old_side}*\nPrezzo: {price}\nProfit/Loss: `{pnl:.2f} USDT`")
 
-def open_trade(side, price, close_old=False, old_qty=0):
-    if close_old:
-        rev_side = "Sell" if side == "Buy" else "Buy"
-        session.place_order(category="linear", symbol=SYMBOL, side=rev_side, orderType="Market", qty=str(old_qty), reduceOnly=True)
-        log(f"🔄 Inversione: Chiusa posizione {rev_side}")
-
+    # 2. Apertura Nuova Posizione
     qty = round((ORDER_VALUE_USDT / price) / QTY_STEP) * QTY_STEP
-    qty = round(qty, 3) # ETH accetta 3 decimali
-    
+    qty = round(qty, 3)
     tp = round((price * (1 + TP_PERCENT/100 if side == "Buy" else 1 - TP_PERCENT/100)) / TICK_SIZE) * TICK_SIZE
     sl = round((price * (1 - SL_PERCENT/100 if side == "Buy" else 1 + SL_PERCENT/100)) / TICK_SIZE) * TICK_SIZE
 
-    res = session.place_order(
-        category="linear", symbol=SYMBOL, side=side, orderType="Market", qty=str(qty),
-        takeProfit=f"{tp:.2f}", stopLoss=f"{sl:.2f}", positionIdx=0
-    )
+    res = session.place_order(category="linear", symbol=SYMBOL, side=side, orderType="Market", qty=str(qty),
+                            takeProfit=f"{tp:.2f}", stopLoss=f"{sl:.2f}", positionIdx=0)
+    
     if res["retCode"] == 0:
-        msg = f"✅ {side.upper()} APERTO @ {price} | TP: {tp} | SL: {sl}"
-        log(msg)
-        telegram(msg)
+        telegram(f"🚀 *APERTO {side.upper()}*\nPrezzo: `{price:.2f}`\nQty: `{qty}`\n🎯 TP: `{tp:.2f}` | 🛡️ SL: `{sl:.2f}`")
 
 # ============================================================
-# LOOP PRINCIPALE
+# MAIN LOOP
 # ============================================================
 if __name__ == "__main__":
-    log("=== BOT AVVIATO (API IN CHIARO) ===")
+    telegram("🤖 *BOT ETH AVVIATO*\nMonitoraggio attivo ogni 30 min.")
     
     while True:
         try:
-            # Aspetta chiusura candela + 10 secondi
             now = datetime.now(UTC)
-            seconds_to_wait = (30 - (now.minute % 30)) * 60 - now.second + 10
-            log(f"Prossimo controllo tra {seconds_to_wait} secondi...")
-            time.sleep(max(seconds_to_wait, 10))
+            wait = (30 - (now.minute % 30)) * 60 - now.second + 12
+            time.sleep(max(wait, 5))
 
-            long_sig, short_sig, price = get_signal()
-            curr_side, curr_qty = get_current_position()
+            bull, bear, price = get_signal()
+            side, qty, entry = get_pos_detail()
 
-            if curr_side is None:
-                if long_sig: open_trade("Buy", price)
-                elif short_sig: open_trade("Sell", price)
+            if bull and side != "Buy":
+                execute_trade("Buy", price, side, qty, entry)
+            elif bear and side != "Sell":
+                execute_trade("Sell", price, side, qty, entry)
             else:
-                # Inversione
-                if curr_side == "Buy" and short_sig:
-                    open_trade("Sell", price, True, curr_qty)
-                elif curr_side == "Sell" and long_sig:
-                    open_trade("Buy", price, True, curr_qty)
-                else:
-                    log("Nessuna inversione rilevata.")
+                log(f"Check: Prezzo {price} | Posizione attuale: {side}")
 
         except Exception as e:
-            log(f"CRASH: {e}")
-            time.sleep(30)
+            log(f"Errore loop: {e}")
+            time.sleep(10)
