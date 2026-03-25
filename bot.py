@@ -52,7 +52,7 @@ def telegram(msg):
 # ============================================================
 
 log("=== BOT AVVIATO - MODALITÀ SOLDI VERI CON INVERSIONI ===")
-telegram("⚠️ BOT avviato - Modalità SOLDI VERI con gestione inversioni")
+telegram("⚠️ BOT avviato - Stock ETH 2,4-8,4")
 
 session = HTTP(
     testnet=False,
