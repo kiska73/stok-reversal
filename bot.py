@@ -45,36 +45,54 @@ def get_instrument_info():
         qty_p = len(str(qty_step).split(".")[1]) if "." in str(qty_step) else 0
         return tick_size, qty_step, price_p, qty_p
     except Exception as e:
-        log(f"Errore recupero info strumento: {e}")
+        log(f"Errore info strumento: {e}")
         return 0.01, 0.01, 2, 2
 
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
 # ============================================================
-# LOGICA SEGNALE
+# LOGICA SEGNALE (Sincronizzata Pine Script)
 # ============================================================
 def get_signal():
     try:
-        klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=150)
+        # Recuperiamo 200 candele per stabilità SMA/EMA
+        klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=200)
+        
+        # Creazione DataFrame e inversione (da Passato a Presente)
         df = pd.DataFrame(klines["result"]["list"], columns=["ts","open","high","low","close","vol","turnover"])
         df["close"] = df["close"].astype(float)
-        df = df[::-1].reset_index(drop=True)
+        df = df.iloc[::-1].reset_index(drop=True) 
 
+        # 1. RSI
         rsi_val = ta.rsi(df["close"], length=RSI_LEN)
-        l, h = rsi_val.rolling(STOCH_LEN).min(), rsi_val.rolling(STOCH_LEN).max()
-        stoch_rsi = (rsi_val - l) / (h - l + 1e-10) * 100
-        k = ta.sma(stoch_rsi, length=K_SMOOTH)
-        d = ta.sma(k, length=D_SMOOTH)
-        ema = ta.ema(df["close"], length=EMA_LEN)
-
-        k_n, k_p = k.iloc[-1], k.iloc[-2]
-        d_n, d_p = d.iloc[-1], d.iloc[-2]
-        p_n, e_n = df["close"].iloc[-1], ema.iloc[-1]
-
-        bull = k_n > d_n and k_p <= (d_p + SLACK) and abs(k_p - d_p) >= DIST_MIN and p_n > e_n
-        bear = k_n < d_n and k_p >= (d_p - SLACK) and abs(k_p - d_p) >= DIST_MIN and p_n < e_n
         
-        return bull, bear, p_n
+        # 2. Stoch RSI (Calcolo manuale come TradingView)
+        lowest_rsi = rsi_val.rolling(window=STOCH_LEN).min()
+        highest_rsi = rsi_val.rolling(window=STOCH_LEN).max()
+        stoch_rsi = (rsi_val - lowest_rsi) / (highest_rsi - lowest_rsi + 1e-10) * 100
+        
+        # 3. Smoothing (SMA su K e SMA su D)
+        df['k'] = ta.sma(stoch_rsi, length=K_SMOOTH)
+        df['d'] = ta.sma(df['k'], length=D_SMOOTH)
+        df['ema'] = ta.ema(df["close"], length=EMA_LEN)
+
+        # Preleviamo l'ultima riga (attuale) e la penultima (precedente)
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        # Logica Cross del Pine Script
+        bull_cross = curr['k'] > curr['d'] and prev['k'] <= (prev['d'] + SLACK) and abs(prev['k'] - prev['d']) >= DIST_MIN
+        bear_cross = curr['k'] < curr['d'] and prev['k'] >= (prev['d'] - SLACK) and abs(prev['k'] - prev['d']) >= DIST_MIN
+        
+        ema_bull_ok = curr['close'] > curr['ema']
+        ema_bear_ok = curr['close'] < curr['ema']
+
+        # LOG DI DEBUG PER CONFRONTO TRADINGVIEW
+        log(f"DEBUG VALORI -> K: {curr['k']:.2f} | D: {curr['d']:.2f} | EMA: {curr['ema']:.2f} | Price: {curr['close']:.2f}")
+        log(f"DEBUG CROSS -> Bull: {bull_cross} (EMA OK: {ema_bull_ok}) | Bear: {bear_cross} (EMA OK: {ema_bear_ok})")
+
+        return (bull_cross and ema_bull_ok), (bear_cross and ema_bear_ok), curr['close']
+    
     except Exception as e:
         log(f"Errore calcolo segnale: {e}")
         return False, False, 0
@@ -116,7 +134,7 @@ def execute_trade(side, price, old_side=None, old_qty=0, old_entry=0):
     )
     
     if res["retCode"] == 0:
-        telegram(f"🚀 *APERTO {side.upper()}*\nPrezzo: `{price:.2f}`\nQty: `{qty_str}`\n🎯 TP: `{tp:.2f}` | 🛡️ SL: `{sl:.2f}`")
+        telegram(f"🚀 *APERTO {side.upper()}*\nPrezzo: `{price:.2f}`\nQty: `{qty_str}`\n🎯 TP: `{tp:.{PRICE_PRECISION}f}` | 🛡️ SL: `{sl:.{PRICE_PRECISION}f}`")
     else:
         telegram(f"❌ *ERRORE ORDINE*: {res['retMsg']}")
 
@@ -124,34 +142,29 @@ def execute_trade(side, price, old_side=None, old_qty=0, old_entry=0):
 # MAIN LOOP
 # ============================================================
 if __name__ == "__main__":
-    telegram("🤖 *BOT ETH RIAVVIATO*\nConnessione Bybit OK (No IP Limit).")
+    telegram("🤖 *BOT ETH AGGIORNATO*\nDebug attivo. Controllo ogni 30m.")
     
     while True:
         try:
             now = datetime.now(UTC)
-            # Attende chiusura candela 30m + 12 secondi
             wait = (30 - (now.minute % 30)) * 60 - now.second + 12
-            if wait < 0: wait = 5 # Sicurezza per evitare wait negativi
-            
+            if wait < 0: wait = 5
             time.sleep(max(wait, 5))
 
-            bull, bear, price = get_signal()
+            long_sig, short_sig, price = get_signal()
             side, qty, entry = get_pos_detail()
 
-            if bull and side != "Buy":
+            if long_sig and side != "Buy":
                 execute_trade("Buy", price, side, qty, entry)
-            elif bear and side != "Sell":
+            elif short_sig and side != "Sell":
                 execute_trade("Sell", price, side, qty, entry)
             else:
-                log(f"Check: {price:.2f} | Pos: {side}")
+                log(f"Check: {price:.2f} | Pos attuale: {side}")
 
         except Exception as e:
             err_msg = str(e)
             log(f"Errore loop: {err_msg}")
-            if "10006" in err_msg: # Rate limit
+            if "10006" in err_msg:
                 time.sleep(60)
-            elif "10010" in err_msg: # IP Limit ancora attivo
-                telegram("⚠️ *ERRORE*: L'IP non è ancora autorizzato su Bybit!")
-                time.sleep(300)
             else:
                 time.sleep(20)
