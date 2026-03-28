@@ -48,11 +48,18 @@ def get_instrument_info():
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
 # ============================================================
-# LOGICA SEGNALE
+# LOGICA SEGNALE (DATI DA SPOT + TRADING SU PERPETUAL)
 # ============================================================
 def get_market_data():
     try:
-        klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=250)
+        # ←←← MODIFICA: usiamo i dati Spot per i segnali
+        klines = session.get_kline(
+            category="spot",           # ←←← SPOT per candele e indicatori
+            symbol=SYMBOL, 
+            interval=INTERVAL, 
+            limit=250
+        )
+        
         df = pd.DataFrame(klines["result"]["list"], columns=["ts","open","high","low","close","vol","turnover"])
         df["close"] = df["close"].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
@@ -85,7 +92,7 @@ def get_pos():
     except: return None, 0, 0
 
 # ============================================================
-# AZIONI
+# AZIONI (tutto sul Perpetual)
 # ============================================================
 def close_position(side, price, qty, entry):
     pnl = (price - entry) * qty if side == "Buy" else (entry - price) * qty
@@ -110,7 +117,7 @@ def open_position(side, price):
 # MAIN LOOP (STEP BY STEP)
 # ============================================================
 if __name__ == "__main__":
-    telegram("🤖 *BOT ETH* | Logica Close-then-Open attiva.")
+    telegram("🤖 *BOT ETH* | Dati da **SPOT** + Trading su **PERPETUAL** | Logica Close-then-Open attiva.")
     while True:
         try:
             now = datetime.now(UTC)
@@ -126,7 +133,7 @@ if __name__ == "__main__":
             if side == "Buy" and bear:
                 close_position(side, price, qty, entry)
                 closed_just_now = True
-                side, qty = None, 0 # Reset locale per permettere eventuale apertura immediata
+                side, qty = None, 0
             elif side == "Sell" and bull:
                 close_position(side, price, qty, entry)
                 closed_just_now = True
