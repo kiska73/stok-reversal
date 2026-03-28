@@ -18,7 +18,6 @@ SYMBOL = "ETHUSDT"
 ORDER_VALUE_USDT = 1000
 INTERVAL = "30"
 
-# Parametri Pine Script Rigorosi
 RSI_LEN, STOCH_LEN, K_SMOOTH, D_SMOOTH = 30, 30, 27, 26
 SLACK, DIST_MIN = 1.0, 0.2
 EMA_LEN = 14
@@ -41,69 +40,42 @@ def get_instrument_info():
         res = session.get_instruments_info(category="linear", symbol=SYMBOL)["result"]["list"][0]
         tick_size = float(res["priceFilter"]["tickSize"])
         qty_step = float(res["lotSizeFilter"]["qtyStep"])
-        price_p = len(str(tick_size).split(".")[1]) if "." in str(tick_size) else 0
-        qty_p = len(str(qty_step).split(".")[1]) if "." in str(qty_step) else 0
-        return tick_size, qty_step, price_p, qty_p
-    except Exception as e:
-        log(f"Errore info: {e}")
-        return 0.01, 0.01, 2, 2
+        p_p = len(str(tick_size).split(".")[1]) if "." in str(tick_size) else 0
+        q_p = len(str(qty_step).split(".")[1]) if "." in str(qty_step) else 0
+        return tick_size, qty_step, p_p, q_p
+    except: return 0.01, 0.01, 2, 2
 
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
 # ============================================================
-# CALCOLO INDICATORI (COPIA ESATTA PINE SCRIPT)
+# LOGICA SEGNALE
 # ============================================================
-def get_signal():
+def get_market_data():
     try:
-        # Buffer ampio per stabilizzare SMA ed EMA
         klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=250)
         df = pd.DataFrame(klines["result"]["list"], columns=["ts","open","high","low","close","vol","turnover"])
         df["close"] = df["close"].astype(float)
-        
-        # IMPORTANTE: Inversione cronologica Bybit (Past -> Present)
         df = df.iloc[::-1].reset_index(drop=True)
 
-        # 1. RSI
         rsi_val = ta.rsi(df["close"], length=RSI_LEN)
+        l_rsi, h_rsi = rsi_val.rolling(STOCH_LEN).min(), rsi_val.rolling(STOCH_LEN).max()
+        stoch_rsi = (rsi_val - l_rsi) / (h_rsi - l_rsi + 1e-10) * 100
+        df['k'] = ta.sma(stoch_rsi, length=K_SMOOTH)
+        df['d'] = ta.sma(df['k'], length=D_SMOOTH)
+        df['ema'] = ta.ema(df["close"], length=EMA_LEN)
 
-        # 2. STOCH RSI (Formula manuale dal tuo Pine)
-        lowest_rsi = rsi_val.rolling(window=STOCH_LEN).min()
-        highest_rsi = rsi_val.rolling(window=STOCH_LEN).max()
-        range_rsi = (highest_rsi - lowest_rsi).apply(lambda x: max(x, 0.00001))
-        stoch_rsi = (rsi_val - lowest_rsi) / range_rsi * 100
+        curr, prev = df.iloc[-1], df.iloc[-2]
 
-        # 3. K e D Smoothing (SMA come ta.sma)
-        k = ta.sma(stoch_rsi, length=K_SMOOTH)
-        d = ta.sma(k, length=D_SMOOTH)
-        ema = ta.ema(df["close"], length=EMA_LEN)
-
-        # Valori attuali [indice -1] e precedenti [indice -2] (corrisponde a k[1] in Pine)
-        k_now, k_prev = k.iloc[-1], k.iloc[-2]
-        d_now, d_prev = d.iloc[-1], d.iloc[-2]
-        price_now = df["close"].iloc[-1]
-        ema_now = ema.iloc[-1]
-
-        # Logica Cross Pine Script
-        # k > d and k[1] <= d[1] + slack and math.abs(k[1]-d[1]) >= dist_min
-        bull_cross = k_now > d_now and k_prev <= (d_prev + SLACK) and abs(k_prev - d_prev) >= DIST_MIN
-        bear_cross = k_now < d_now and k_prev >= (d_prev - SLACK) and abs(k_prev - d_prev) >= DIST_MIN
+        # INCROCI PURI (Senza EMA)
+        bull_cross = curr['k'] > curr['d'] and prev['k'] <= (prev['d'] + SLACK) and abs(prev['k'] - prev['d']) >= DIST_MIN
+        bear_cross = curr['k'] < curr['d'] and prev['k'] >= (prev['d'] - SLACK) and abs(prev['k'] - prev['d']) >= DIST_MIN
         
-        ema_bull_ok = price_now > ema_now
-        ema_bear_ok = price_now < ema_now
-
-        log(f"K: {k_now:.2f} (Prev: {k_prev:.2f}) | D: {d_now:.2f} (Prev: {d_prev:.2f})")
-        log(f"Prezzo: {price_now:.2f} | EMA: {ema_now:.2f}")
-
-        return (bull_cross and ema_bull_ok), (bear_cross and ema_bear_ok), price_now
-
+        return bull_cross, bear_cross, curr['close'], curr['ema']
     except Exception as e:
-        log(f"Errore: {e}")
-        return False, False, 0
+        log(f"Errore dati: {e}")
+        return False, False, 0, 0
 
-# ============================================================
-# ESECUZIONE (GESTIONE REVERSE)
-# ============================================================
-def get_pos_detail():
+def get_pos():
     try:
         res = session.get_positions(category="linear", symbol=SYMBOL)["result"]["list"]
         for p in res:
@@ -112,35 +84,33 @@ def get_pos_detail():
         return None, 0, 0
     except: return None, 0, 0
 
-def execute_trade(side, price, old_side=None, old_qty=0, old_entry=0):
-    # Reverse Close
-    if old_side and old_qty > 0:
-        pnl = (price - old_entry) * old_qty if old_side == "Buy" else (old_entry - price) * old_qty
-        emoji = "💰" if pnl > 0 else "📉"
-        session.place_order(category="linear", symbol=SYMBOL, side="Sell" if old_side=="Buy" else "Buy", 
-                            orderType="Market", qty=f"{old_qty:.{QTY_PRECISION}f}", reduceOnly=True)
-        telegram(f"{emoji} *CHIUSO {old_side}*\nProfit/Loss: `{pnl:.2f} USDT`")
+# ============================================================
+# AZIONI
+# ============================================================
+def close_position(side, price, qty, entry):
+    pnl = (price - entry) * qty if side == "Buy" else (entry - price) * qty
+    emoji = "💰" if pnl > 0 else "📉"
+    session.place_order(category="linear", symbol=SYMBOL, side="Sell" if side=="Buy" else "Buy", 
+                        orderType="Market", qty=f"{qty:.{QTY_PRECISION}f}", reduceOnly=True)
+    telegram(f"{emoji} *CHIUSO {side.upper()} (CROSS)*\nPrezzo: `{price:.2f}`\nPNL: `{pnl:.2f} USDT`")
 
-    # Apertura Nuova
+def open_position(side, price):
     qty = math.floor((ORDER_VALUE_USDT / price) / QTY_STEP) * QTY_STEP
-    qty_str = f"{qty:.{QTY_PRECISION}f}"
-    
     tp = round((price * (1 + TP_PERCENT/100 if side == "Buy" else 1 - TP_PERCENT/100)) / TICK_SIZE) * TICK_SIZE
     sl = round((price * (1 - SL_PERCENT/100 if side == "Buy" else 1 + SL_PERCENT/100)) / TICK_SIZE) * TICK_SIZE
 
     res = session.place_order(
-        category="linear", symbol=SYMBOL, side=side, orderType="Market", qty=qty_str,
+        category="linear", symbol=SYMBOL, side=side, orderType="Market", qty=f"{qty:.{QTY_PRECISION}f}",
         takeProfit=f"{tp:.{PRICE_PRECISION}f}", stopLoss=f"{sl:.{PRICE_PRECISION}f}", positionIdx=0
     )
-    
     if res["retCode"] == 0:
-        telegram(f"🚀 *APERTO {side.upper()}*\nPrezzo: `{price:.2f}`\n🎯 TP: `{tp:.{PRICE_PRECISION}f}` | 🛡️ SL: `{sl:.{PRICE_PRECISION}f}`")
+        telegram(f"🚀 *APERTO {side.upper()}*\nPrezzo: `{price:.2f}`\n🎯 TP: `{tp:.2f}` | 🛡️ SL: `{sl:.2f}`")
 
 # ============================================================
-# MAIN LOOP
+# MAIN LOOP (STEP BY STEP)
 # ============================================================
 if __name__ == "__main__":
-    telegram("🤖 *BOT ETH ONLINE*\nSincronizzato al 100% con Pine Script.")
+    telegram("🤖 *BOT ETH* | Logica Close-then-Open attiva.")
     while True:
         try:
             now = datetime.now(UTC)
@@ -148,15 +118,27 @@ if __name__ == "__main__":
             if wait < 0: wait = 5
             time.sleep(max(wait, 5))
 
-            bull, bear, price = get_signal()
-            side, qty, entry = get_pos_detail()
+            bull, bear, price, ema = get_market_data()
+            side, qty, entry = get_pos()
 
-            if bull and side != "Buy":
-                execute_trade("Buy", price, side, qty, entry)
-            elif bear and side != "Sell":
-                execute_trade("Sell", price, side, qty, entry)
+            # STEP 1: CHECK USCITA (Se incrocia, chiudi a prescindere dall'EMA)
+            closed_just_now = False
+            if side == "Buy" and bear:
+                close_position(side, price, qty, entry)
+                closed_just_now = True
+                side, qty = None, 0 # Reset locale per permettere eventuale apertura immediata
+            elif side == "Sell" and bull:
+                close_position(side, price, qty, entry)
+                closed_just_now = True
+                side, qty = None, 0
+
+            # STEP 2: CHECK ENTRATA (Con filtro EMA)
+            if bull and price > ema and side != "Buy":
+                open_position("Buy", price)
+            elif bear and price < ema and side != "Sell":
+                open_position("Sell", price)
             else:
-                log(f"Monitoraggio... Prezzo: {price:.2f} | Pos: {side}")
+                log(f"Check: {price:.2f} | EMA: {ema:.2f} | Pos: {side}")
 
         except Exception as e:
             log(f"Errore: {e}")
