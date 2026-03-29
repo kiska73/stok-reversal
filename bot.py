@@ -41,6 +41,13 @@ session = HTTP(
 )
 
 # ============================================================
+# CROSS MEMORY (1 candela dopo)
+# ============================================================
+
+bull_memory = 0
+bear_memory = 0
+
+# ============================================================
 # LOG
 # ============================================================
 
@@ -53,10 +60,12 @@ def log(msg):
 # ============================================================
 
 def telegram(msg):
+
     if TELEGRAM_TOKEN == "":
         return
 
     try:
+
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
         requests.post(
@@ -68,6 +77,7 @@ def telegram(msg):
             },
             timeout=5
         )
+
     except:
         pass
 
@@ -123,7 +133,6 @@ def get_market_data():
 
         df = df.iloc[::-1].reset_index(drop=True)
 
-        # RSI
         rsi_val = ta.rsi(df["close"], length=RSI_LEN)
 
         lowest_rsi = rsi_val.rolling(STOCH_LEN).min()
@@ -138,7 +147,6 @@ def get_market_data():
 
         df["ema"] = ta.ema(df["close"], length=EMA_LEN)
 
-        # SOLO CANDELE CHIUSE (replica Pine)
         curr = df.iloc[-2]
         prev = df.iloc[-3]
 
@@ -158,10 +166,9 @@ def get_market_data():
 
     except Exception as e:
 
-        log(f"Data error {e}")
+        log(f"Market data error {e}")
 
         return False, False, 0, 0
-
 
 # ============================================================
 # POSITION
@@ -190,9 +197,8 @@ def get_position():
 
         return None, 0, 0
 
-
 # ============================================================
-# CLOSE
+# CLOSE POSITION
 # ============================================================
 
 def close_position(side, qty):
@@ -214,9 +220,8 @@ def close_position(side, qty):
 
         log(f"Close error {e}")
 
-
 # ============================================================
-# OPEN
+# OPEN POSITION
 # ============================================================
 
 def open_position(side, price):
@@ -248,9 +253,8 @@ def open_position(side, price):
 
         log(f"Open error {e}")
 
-
 # ============================================================
-# WAIT FOR CANDLE CLOSE
+# WAIT NEXT CANDLE
 # ============================================================
 
 def wait_next_candle():
@@ -264,7 +268,6 @@ def wait_next_candle():
 
     time.sleep(wait)
 
-
 # ============================================================
 # MAIN LOOP
 # ============================================================
@@ -272,6 +275,8 @@ def wait_next_candle():
 if __name__ == "__main__":
 
     telegram("BOT ETH STARTED")
+
+    global bull_memory, bear_memory
 
     while True:
 
@@ -281,9 +286,20 @@ if __name__ == "__main__":
 
             bull, bear, price, ema = get_market_data()
 
+            # aggiorna memoria cross
+            if bull:
+                bull_memory = 1
+            else:
+                bull_memory = max(bull_memory - 1, 0)
+
+            if bear:
+                bear_memory = 1
+            else:
+                bear_memory = max(bear_memory - 1, 0)
+
             side, qty, entry = get_position()
 
-            # REVERSE CLOSE
+            # reverse close
             if side == "Buy" and bear:
                 close_position(side, qty)
                 side = None
@@ -293,13 +309,15 @@ if __name__ == "__main__":
                 side = None
 
             # ENTRY
-            if bull and price > ema and side != "Buy":
+            if bull_memory > 0 and price > ema and side != "Buy":
 
                 open_position("Buy", price)
+                bull_memory = 0
 
-            elif bear and price < ema and side != "Sell":
+            elif bear_memory > 0 and price < ema and side != "Sell":
 
                 open_position("Sell", price)
+                bear_memory = 0
 
             else:
 
