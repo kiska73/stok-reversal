@@ -17,7 +17,6 @@ TELEGRAM_CHAT_ID = "820279313"
 
 
 SYMBOL = "ETHUSDT"
-
 ORDER_VALUE_USDT = 1000
 INTERVAL = "30"  # minuti
 
@@ -39,13 +38,6 @@ session = HTTP(
     api_key=API_KEY,
     api_secret=API_SECRET
 )
-
-# ============================================================
-# CROSS MEMORY (1 candela dopo)
-# ============================================================
-
-bull_memory = 0
-bear_memory = 0
 
 # ============================================================
 # LOG & TELEGRAM
@@ -92,6 +84,7 @@ def get_market_data():
         df["close"] = df["close"].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
 
+        # STOCH RSI
         rsi_val = ta.rsi(df["close"], length=RSI_LEN)
         lowest_rsi = rsi_val.rolling(STOCH_LEN).min()
         highest_rsi = rsi_val.rolling(STOCH_LEN).max()
@@ -102,11 +95,13 @@ def get_market_data():
         df["d"] = ta.sma(df["k"], length=D_SMOOTH)
         df["ema"] = ta.ema(df["close"], length=EMA_LEN)
 
-        curr = df.iloc[-2]
-        prev = df.iloc[-3]
+        # Candela corrente chiusa e precedente
+        curr = df.iloc[-2]  # ultima candela chiusa
+        prev = df.iloc[-3]  # candela chiusa prima
 
-        bull_cross = (curr["k"] > curr["d"] and prev["k"] <= prev["d"] + SLACK and abs(prev["k"] - prev["d"]) >= DIST_MIN)
-        bear_cross = (curr["k"] < curr["d"] and prev["k"] >= prev["d"] - SLACK and abs(prev["k"] - prev["d"]) >= DIST_MIN)
+        # INCROCI
+        bull_cross = curr["k"] > curr["d"] and prev["k"] <= prev["d"] + SLACK and abs(prev["k"] - prev["d"]) >= DIST_MIN
+        bear_cross = curr["k"] < curr["d"] and prev["k"] >= prev["d"] - SLACK and abs(prev["k"] - prev["d"]) >= DIST_MIN
 
         return bull_cross, bear_cross, curr["close"], curr["ema"]
     except Exception as e:
@@ -167,7 +162,7 @@ def open_position(side, price):
             stopLoss=f"{sl:.{PRICE_PRECISION}f}",
             positionIdx=0
         )
-        log(f"APERTO {side} @ {price}")
+        log(f"APERTO {side} @ {price:.2f}")
     except Exception as e:
         log(f"Open error {e}")
 
@@ -189,45 +184,24 @@ if __name__ == "__main__":
         try:
             wait_next_candle()
             bull, bear, price, ema = get_market_data()
-
-            # aggiorna memoria cross
-            global bull_memory, bear_memory
-            if bull:
-                bull_memory = 1
-            else:
-                bull_memory = max(bull_memory - 1, 0)
-
-            if bear:
-                bear_memory = 1
-            else:
-                bear_memory = max(bear_memory - 1, 0)
-
             side, qty, entry = get_position()
 
             # --- REVERSE IMMEDIATO ---
-            if side == "Buy" and bear_memory > 0 and price < ema:
+            if side == "Buy" and bear and price < ema:
                 close_position(side, qty)
                 open_position("Sell", price)
                 side = "Sell"
-                bull_memory = 0
-                bear_memory = 0
-
-            elif side == "Sell" and bull_memory > 0 and price > ema:
+            elif side == "Sell" and bull and price > ema:
                 close_position(side, qty)
                 open_position("Buy", price)
                 side = "Buy"
-                bull_memory = 0
-                bear_memory = 0
 
             # --- SE NON CI SONO POSIZIONI ---
             elif side is None:
-                if bull_memory > 0 and price > ema:
+                if bull and price > ema:
                     open_position("Buy", price)
-                    bull_memory = 0
-                elif bear_memory > 0 and price < ema:
+                elif bear and price < ema:
                     open_position("Sell", price)
-                    bear_memory = 0
-
             else:
                 log(f"Check price={price:.2f} ema={ema:.2f} pos={side}")
 
