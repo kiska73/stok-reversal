@@ -84,7 +84,6 @@ def get_market_data():
         df["close"] = df["close"].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
 
-        # STOCH RSI
         rsi_val = ta.rsi(df["close"], length=RSI_LEN)
         lowest_rsi = rsi_val.rolling(STOCH_LEN).min()
         highest_rsi = rsi_val.rolling(STOCH_LEN).max()
@@ -95,11 +94,9 @@ def get_market_data():
         df["d"] = ta.sma(df["k"], length=D_SMOOTH)
         df["ema"] = ta.ema(df["close"], length=EMA_LEN)
 
-        # Candela corrente chiusa e precedente
         curr = df.iloc[-2]  # ultima candela chiusa
-        prev = df.iloc[-3]  # candela chiusa prima
+        prev = df.iloc[-3]  # candela prima
 
-        # INCROCI
         bull_cross = curr["k"] > curr["d"] and prev["k"] <= prev["d"] + SLACK and abs(prev["k"] - prev["d"]) >= DIST_MIN
         bear_cross = curr["k"] < curr["d"] and prev["k"] >= prev["d"] - SLACK and abs(prev["k"] - prev["d"]) >= DIST_MIN
 
@@ -196,12 +193,14 @@ if __name__ == "__main__":
                 open_position("Buy", price)
                 side = "Buy"
 
-            # --- SE NON CI SONO POSIZIONI ---
+            # --- SE NON CI SONO POSIZIONI O CROSS PRECEDENTE ---
             elif side is None:
                 if bull and price > ema:
                     open_position("Buy", price)
                 elif bear and price < ema:
                     open_position("Sell", price)
+
+            # --- LOG ---
             else:
                 log(f"Check price={price:.2f} ema={ema:.2f} pos={side}")
 
