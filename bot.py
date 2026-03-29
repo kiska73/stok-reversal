@@ -77,7 +77,7 @@ def get_instrument_info():
         q_prec = len(str(qty).split(".")[1]) if "." in str(qty) else 0
         return tick, qty, p_prec, q_prec
     except:
-        return 0.01, 0.01, 2, 3
+        return 0.01, 0.001, 2, 3
 
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
@@ -184,7 +184,6 @@ def wait_next_candle():
 
 if __name__ == "__main__":
     telegram("🤖 BOT ETH STARTED")
-    global bull_memory, bear_memory
 
     while True:
         try:
@@ -192,6 +191,7 @@ if __name__ == "__main__":
             bull, bear, price, ema = get_market_data()
 
             # aggiorna memoria cross
+            global bull_memory, bear_memory
             if bull:
                 bull_memory = 1
             else:
