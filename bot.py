@@ -31,11 +31,10 @@ EMA_LEN          = 14
 TP_PERCENT       = 8.4
 SL_PERCENT       = 2.4
 
-LIMIT_BUFFER     = 0.0010      # 0.10% - buffer per migliorare prezzo Limit
-MAX_WAIT_FILL    = 120         # secondi di attesa fill
+LIMIT_BUFFER     = 0.0010      # 0.10% - Buffer per migliorare prezzo Limit
+MAX_WAIT_FILL    = 120         # Secondi di attesa fill prima del fallback
 
-# Cambia in True per testare senza rischiare soldi reali
-TESTNET          = False
+TESTNET          = False       # Cambia in True per testare su rete demo
 
 session = HTTP(
     testnet=TESTNET,
@@ -82,7 +81,7 @@ def get_instrument_info():
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
 # ============================================================
-# ====================== MARKET DATA (LINEAR) ================
+# ====================== MARKET DATA =========================
 # ============================================================
 
 def get_market_data():
@@ -130,11 +129,11 @@ def get_position():
         return None, 0.0, 0.0
 
 # ============================================================
-# ====================== HELPER ==============================
+# ====================== UTILS ===============================
 # ============================================================
 
 def calculate_qty(price):
-    """Ritorna qty esatta per \~1000 USDT"""
+    """Ritorna qty esatta per circa 1000 USDT"""
     qty = ORDER_VALUE_USDT / price
     qty = math.floor(qty / QTY_STEP) * QTY_STEP
     return max(qty, QTY_STEP)
@@ -146,95 +145,65 @@ def cancel_all_orders():
         pass
 
 def wait_for_fill(expected_side=None, timeout=MAX_WAIT_FILL):
-    """Polling veloce e affidabile"""
     start = time.time()
     while time.time() - start < timeout:
         side, qty, _ = get_position()
-        if expected_side is None:               # CLOSE
+        if expected_side is None:               # Caso chiusura (None = nessuna posizione)
             if qty < 0.0001:
                 return True, 0.0
         elif side == expected_side and qty > 0.0001:
             return True, qty
-        time.sleep(8)
+        time.sleep(10)
     return False, 0.0
 
 # ============================================================
-# ====================== OPEN POSITION =======================
+# ====================== OPERAZIONI ==========================
 # ============================================================
 
 def open_position(side, price):
     target_qty = calculate_qty(price)
-    if target_qty <= 0:
-        return False
-
-    # Prezzo Limit con buffer
+    
     if side == "Buy":
         order_price = round(price * (1 - LIMIT_BUFFER) / TICK_SIZE) * TICK_SIZE
     else:
         order_price = round(price * (1 + LIMIT_BUFFER) / TICK_SIZE) * TICK_SIZE
 
-    # TP/SL calcolati sul prezzo del Limit (coerente con backtest)
     tp = round(order_price * (1 + TP_PERCENT/100 if side == "Buy" else 1 - TP_PERCENT/100) / TICK_SIZE) * TICK_SIZE
     sl = round(order_price * (1 - SL_PERCENT/100 if side == "Buy" else 1 + SL_PERCENT/100) / TICK_SIZE) * TICK_SIZE
 
     try:
-        cancel_all_orders()                     # pulizia ordini vecchi
+        cancel_all_orders()
         res = session.place_order(
-            category="linear",
-            symbol=SYMBOL,
-            side=side,
-            orderType="Limit",
-            qty=f"{target_qty:.{QTY_PRECISION}f}",
-            price=f"{order_price:.{PRICE_PRECISION}f}",
-            takeProfit=f"{tp:.{PRICE_PRECISION}f}",
-            stopLoss=f"{sl:.{PRICE_PRECISION}f}",
-            positionIdx=0,
-            timeInForce="GTC"
+            category="linear", symbol=SYMBOL, side=side, orderType="Limit",
+            qty=f"{target_qty:.{QTY_PRECISION}f}", price=f"{order_price:.{PRICE_PRECISION}f}",
+            takeProfit=f"{tp:.{PRICE_PRECISION}f}", stopLoss=f"{sl:.{PRICE_PRECISION}f}",
+            positionIdx=0, timeInForce="GTC"
         )
         order_id = res["result"]["orderId"]
-
-        log(f"LIMIT OPEN {side} @ {order_price:.2f} | Target: {target_qty:.4f} ETH")
+        log(f"LIMIT OPEN {side} @ {order_price:.2f}")
         telegram(f"📍 **LIMIT OPEN {side}** @ {order_price:.2f}")
 
-        # Aspettiamo il fill
         filled, current_qty = wait_for_fill(side, timeout=MAX_WAIT_FILL)
 
-        if filled and current_qty >= target_qty * 0.95:
-            log(f"✅ OPEN {side} FILLED qty {current_qty:.4f}")
+        if not filled or current_qty < target_qty * 0.95:
+            log("Partial fill o timeout -> fallback Market")
+            session.cancel_order(category="linear", symbol=SYMBOL, orderId=order_id)
+            remaining = target_qty - current_qty
+            if remaining > QTY_STEP:
+                session.place_order(
+                    category="linear", symbol=SYMBOL, side=side, orderType="Market",
+                    qty=f"{remaining:.{QTY_PRECISION}f}", positionIdx=0
+                )
+                telegram(f"⚠️ **{side}** completato a Market")
+        else:
             telegram(f"✅ **{side} FILLED** qty {current_qty:.4f}")
-            return True
-
-        # Partial fill o timeout → completiamo con Market
-        log(f"Partial/Timeout → completiamo con Market | Filled: {current_qty:.4f} / {target_qty:.4f}")
-        remaining = target_qty - current_qty
-        if remaining > QTY_STEP * 0.5:
-            session.place_order(
-                category="linear",
-                symbol=SYMBOL,
-                side=side,
-                orderType="Market",
-                qty=f"{remaining:.{QTY_PRECISION}f}",
-                positionIdx=0
-            )
-            telegram(f"⚠️ **{side}** completato a MARKET (partial fill)")
-
-        # Verifica finale
-        _, final_qty, _ = get_position()
-        log(f"Posizione finale {side} qty: {final_qty:.4f} ETH")
         return True
-
     except Exception as e:
         log(f"Open error: {e}")
-        telegram(f"❌ Open error {side}")
         return False
-
-# ============================================================
-# ====================== CLOSE POSITION ======================
-# ============================================================
 
 def close_position(current_side, qty, price):
     close_side = "Sell" if current_side == "Buy" else "Buy"
-
     if close_side == "Sell":
         order_price = round(price * (1 + LIMIT_BUFFER) / TICK_SIZE) * TICK_SIZE
     else:
@@ -243,43 +212,30 @@ def close_position(current_side, qty, price):
     try:
         cancel_all_orders()
         session.place_order(
-            category="linear",
-            symbol=SYMBOL,
-            side=close_side,
-            orderType="Limit",
-            qty=f"{qty:.{QTY_PRECISION}f}",
-            price=f"{order_price:.{PRICE_PRECISION}f}",
-            reduceOnly=True,
-            timeInForce="GTC"
+            category="linear", symbol=SYMBOL, side=close_side, orderType="Limit",
+            qty=f"{qty:.{QTY_PRECISION}f}", price=f"{order_price:.{PRICE_PRECISION}f}",
+            reduceOnly=True, timeInForce="GTC"
         )
-        log(f"LIMIT CLOSE {current_side} → {close_side} @ {order_price:.2f}")
+        log(f"LIMIT CLOSE {current_side} @ {order_price:.2f}")
 
         filled, _ = wait_for_fill(None, timeout=90)
-        if filled:
-            log(f"✅ CLOSE {current_side} completato con Limit")
-            telegram(f"✅ **CHIUSO {current_side}** (Limit)")
-            return True
-        else:
-            log("Close Limit timeout → Market fallback")
+        if not filled:
+            log("Close Limit timeout -> Market fallback")
             cancel_all_orders()
             session.place_order(
-                category="linear",
-                symbol=SYMBOL,
-                side=close_side,
-                orderType="Market",
-                qty=f"{qty:.{QTY_PRECISION}f}",
-                reduceOnly=True
+                category="linear", symbol=SYMBOL, side=close_side, orderType="Market",
+                qty=f"{qty:.{QTY_PRECISION}f}", reduceOnly=True
             )
-            telegram(f"🔴 **CHIUSO {current_side}** (Market fallback)")
-            return True
-
+            telegram(f"🔴 **CHIUSO {current_side}** (Market)")
+        else:
+            telegram(f"✅ **CHIUSO {current_side}** (Limit)")
+        return True
     except Exception as e:
         log(f"Close error: {e}")
-        telegram(f"❌ Close error {current_side}")
         return False
 
 # ============================================================
-# ====================== WAIT NEXT CANDLE ====================
+# ====================== MAIN LOOP ===========================
 # ============================================================
 
 def wait_next_candle():
@@ -287,47 +243,36 @@ def wait_next_candle():
     minutes_to_wait = 30 - (now.minute % 30)
     seconds_to_wait = (minutes_to_wait * 60) - now.second + 5
     if seconds_to_wait < 5:
-        seconds_to_wait = 1805  # prossima candela completa
+        seconds_to_wait = 1805
     time.sleep(seconds_to_wait)
-
-# ============================================================
-# ====================== MAIN LOOP ===========================
-# ============================================================
 
 if __name__ == "__main__":
     mode = "TESTNET" if TESTNET else "LIVE"
-    telegram(f"🤖 **BOT ETH STARTED** - {mode} | Limit + Partial Fill Safe")
-    log(f"Bot avviato in {mode} - Versione stabile")
+    telegram(f"🤖 **BOT ETH STARTED** - {mode}")
+    log(f"Bot avviato in {mode}")
 
     while True:
         try:
             wait_next_candle()
             bull, bear, price, ema = get_market_data()
-            if price == 0:
-                continue
+            if price == 0: continue
 
             side, qty, _ = get_position()
 
-            # === REVERSE ===
             if side == "Buy" and bear and price < ema:
                 if close_position(side, qty, price):
                     open_position("Sell", price)
             elif side == "Sell" and bull and price > ema:
                 if close_position(side, qty, price):
                     open_position("Buy", price)
-
-            # === NUOVA POSIZIONE ===
             elif side is None:
                 if bull and price > ema:
                     open_position("Buy", price)
                 elif bear and price < ema:
                     open_position("Sell", price)
-
-            # === MONITORAGGIO ===
             else:
-                log(f"Monitor | Price: {price:.2f} | EMA: {ema:.2f} | Pos: {side} | Qty: {qty:.4f}")
+                log(f"Monitor | Price: {price:.2f} | Pos: {side}")
 
         except Exception as e:
             log(f"Loop Error: {e}")
-            telegram(f"⚠️ Loop error: {str(e)[:100]}")
             time.sleep(30)
