@@ -24,9 +24,9 @@ STOCH_LEN        = 30
 K_SMOOTH         = 27
 D_SMOOTH         = 26
 
-SLACK            = 1.0
+SLACK            = 1.1
 DIST_MIN         = 0.2
-EMA_LEN          = 14
+EMA_LEN          = 13
 
 TP_PERCENT       = 8.4
 SL_PERCENT       = 2.4
