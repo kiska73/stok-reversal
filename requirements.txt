@@ -1,5 +1,5 @@
-
-pandas==2.2.2
-pandas-ta==0.3.14b0
 requests
+pandas>=2.2.2
+pandas-ta
 pybit
+
