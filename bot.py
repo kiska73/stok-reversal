@@ -27,11 +27,11 @@ K_SMOOTH         = 27
 D_SMOOTH         = 26
 EMA_LEN          = 10  # Allineato a Pine
 
-SLACK            = 0
+SLACK            = 0.1
 DIST_MIN         = 0.1
 
 TP_PERCENT       = 8.4
-SL_PERCENT       = 2.4
+SL_PERCENT       = 2.2
 
 LIMIT_BUFFER     = 0.0010
 MAX_WAIT_FILL    = 120
