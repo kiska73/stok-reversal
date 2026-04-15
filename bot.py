@@ -25,10 +25,10 @@ RSI_LEN          = 30
 STOCH_LEN        = 30
 K_SMOOTH         = 27
 D_SMOOTH         = 26
-EMA_LEN          = 14  # Allineato a Pine
+EMA_LEN          = 10  # Allineato a Pine
 
-SLACK            = 1.1
-DIST_MIN         = 0.2
+SLACK            = 0
+DIST_MIN         = 0.1
 
 TP_PERCENT       = 8.4
 SL_PERCENT       = 2.4
