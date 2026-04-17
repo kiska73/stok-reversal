@@ -20,6 +20,7 @@ SYMBOL           = "ETHUSDT"
 ORDER_VALUE_USDT = 1000
 INTERVAL         = "30"
 
+# Parametri indicatori
 RSI_LEN          = 30
 STOCH_LEN        = 30
 K_SMOOTH         = 27
@@ -42,7 +43,7 @@ bull_memory = 0
 bear_memory = 0
 
 # ============================================================
-# ====================== UTILITY =============================
+# ====================== UTILITY ======================
 # ============================================================
 
 def log(msg):
@@ -70,7 +71,7 @@ def get_instrument_info():
         qty_step = float(info["lotSizeFilter"]["qtyStep"])
         p_prec = len(str(tick).split(".")[1]) if "." in str(tick) else 0
         q_prec = len(str(qty_step).split(".")[1]) if "." in str(qty_step) else 0
-        log(f"✓ Instrument loaded → Tick: {tick} | QtyStep: {qty_step}")
+        log(f"✓ Instrument OK → Tick: {tick} | QtyStep: {qty_step}")
         return tick, qty_step, p_prec, q_prec
     except Exception as e:
         log(f"✗ Instrument error: {e}")
@@ -79,27 +80,27 @@ def get_instrument_info():
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
 # ============================================================
-# ====================== INDICATORI MANUALI ==================
+# ====================== INDICATORI (senza pandas-ta) =======
 # ============================================================
 
 def calculate_rsi(series, period=RSI_LEN):
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def calculate_stoch_rsi(df, rsi_len=RSI_LEN, stoch_len=STOCH_LEN, k= K_SMOOTH, d=D_SMOOTH):
-    rsi = calculate_rsi(df["close"], rsi_len)
-    lowest = rsi.rolling(stoch_len).min()
-    highest = rsi.rolling(stoch_len).max()
-    stoch = (rsi - lowest) / (highest - lowest).clip(lower=1e-8) * 100
-    k_line = stoch.rolling(k).mean()
-    d_line = k_line.rolling(d).mean()
-    return k_line, d_line
+def calculate_stoch_rsi(df):
+    rsi = calculate_rsi(df["close"], RSI_LEN)
+    lowest = rsi.rolling(STOCH_LEN).min()
+    highest = rsi.rolling(STOCH_LEN).max()
+    stoch = ((rsi - lowest) / (highest - lowest).clip(lower=1e-8)) * 100
+    k = stoch.rolling(K_SMOOTH).mean()
+    d = k.rolling(D_SMOOTH).mean()
+    return k, d
 
 # ============================================================
-# ====================== TRADING FUNCTIONS ===================
+# ====================== MARKET DATA ========================
 # ============================================================
 
 def get_market_data():
@@ -107,18 +108,18 @@ def get_market_data():
         klines = session.get_kline(category="linear", symbol=SYMBOL, interval=INTERVAL, limit=250)
         df = pd.DataFrame(klines["result"]["list"], columns=["ts","open","high","low","close","vol","turnover"])
         df = df.astype(float)
-        df = df.iloc[::-1].reset_index(drop=True)   # oldest to newest
+        df = df.iloc[::-1].reset_index(drop=True)
 
         df["k"], df["d"] = calculate_stoch_rsi(df)
         df["ema"] = df["close"].ewm(span=EMA_LEN, adjust=False).mean()
 
-        curr = df.iloc[-2]
+        curr = df.iloc[-2]   # ultima candela chiusa
         prev = df.iloc[-3]
 
         bull_cross = (prev["k"] <= prev["d"] + SLACK) and (curr["k"] > curr["d"]) and abs(prev["k"] - prev["d"]) >= DIST_MIN
         bear_cross = (prev["k"] >= prev["d"] - SLACK) and (curr["k"] < curr["d"]) and abs(prev["k"] - prev["d"]) >= DIST_MIN
 
-        log(f"Market Data → Price: {curr['close']:.2f} | EMA: {curr['ema']:.2f} | K:{curr['k']:.1f} D:{curr['d']:.1f} | Bull:{bull_cross} Bear:{bear_cross}")
+        log(f"Market → Price:{curr['close']:.2f} | EMA:{curr['ema']:.2f} | K:{curr['k']:.1f} D:{curr['d']:.1f} | Bull:{bull_cross} Bear:{bear_cross}")
 
         return bull_cross, bear_cross, float(curr["close"]), float(curr["ema"])
     except Exception as e:
@@ -131,7 +132,7 @@ def get_position():
         for p in res:
             size = float(p.get("size", 0))
             if size > 0.0001:
-                return p["side"], size, float(p.get("avgPrice", 0))
+                return p.get("side"), size, float(p.get("avgPrice", 0))
         return None, 0.0, 0.0
     except Exception as e:
         log(f"✗ Position error: {e}")
@@ -143,8 +144,10 @@ def calculate_qty(price):
     return max(qty, QTY_STEP)
 
 def cancel_all_orders():
-    try: session.cancel_all_orders(category="linear", symbol=SYMBOL)
-    except: pass
+    try:
+        session.cancel_all_orders(category="linear", symbol=SYMBOL)
+    except:
+        pass
 
 def wait_for_fill(expected_side=None, timeout=MAX_WAIT_FILL):
     start = time.time()
@@ -172,11 +175,11 @@ def open_position(side, price):
             takeProfit=f"{tp:.{PRICE_PRECISION}f}", stopLoss=f"{sl:.{PRICE_PRECISION}f}",
             positionIdx=0, timeInForce="GTC"
         )
-        log(f"✓ OPEN {side} Limit @ {order_price:.2f} | Qty {target_qty}")
+        log(f"✓ OPEN {side} @ {order_price:.2f} | Qty: {target_qty}")
+        
         filled, _ = wait_for_fill(side)
         if not filled:
-            log("⚠️ Not filled → using Market")
-            # cancel + market logic...
+            log("⚠️ Limit not filled → skipping for now")
         return True
     except Exception as e:
         log(f"✗ Open error: {e}")
@@ -188,10 +191,12 @@ def close_position(current_side, qty, price):
     try:
         cancel_all_orders()
         time.sleep(0.5)
-        session.place_order(category="linear", symbol=SYMBOL, side=close_side, orderType="Limit",
-                            qty=f"{qty:.{QTY_PRECISION}f}", price=f"{order_price:.{PRICE_PRECISION}f}",
-                            reduceOnly=True, timeInForce="GTC")
-        log(f"✓ CLOSE {close_side} Limit @ {order_price:.2f}")
+        session.place_order(
+            category="linear", symbol=SYMBOL, side=close_side, orderType="Limit",
+            qty=f"{qty:.{QTY_PRECISION}f}", price=f"{order_price:.{PRICE_PRECISION}f}",
+            reduceOnly=True, timeInForce="GTC"
+        )
+        log(f"✓ CLOSE {close_side} @ {order_price:.2f}")
         return True
     except Exception as e:
         log(f"✗ Close error: {e}")
@@ -209,52 +214,61 @@ def wait_next_candle():
             return
 
 # ============================================================
-# ====================== MAIN =================================
+# ====================== MAIN LOOP ===========================
 # ============================================================
 
 if __name__ == "__main__":
-    log("=== BOT ETH REVERSAL STARTING ===")
-    log(f"Mode: {'TESTNET' if TESTNET else 'LIVE'} | Symbol: {SYMBOL} | Value: {ORDER_VALUE_USDT} USDT")
-    log(f"API Key present: {bool(API_KEY)}")
+    log("=== BOT ETH REVERSAL STARTED ===")
+    log(f"Mode: {'TESTNET' if TESTNET else 'LIVE'} | Symbol: {SYMBOL} | Value: ${ORDER_VALUE_USDT}")
+    log(f"Python version: {sys.version.split()[0]} | pandas: {pd.__version__}")
 
-    telegram(f"🚀 **BOT STARTED** - {'TESTNET' if TESTNET else 'LIVE'}")
+    telegram(f"🚀 **BOT ETH REVERSAL STARTED** - {'TESTNET' if TESTNET else 'LIVE'}")
 
     while True:
         try:
             wait_next_candle()
+            
             bull_cross, bear_cross, price, ema = get_market_data()
-            if price == 0:
+            if price == 0.0:
+                time.sleep(10)
                 continue
 
             side, qty, _ = get_position()
 
-            # Memory
-            if bull_cross: bull_memory = 2
-            else: bull_memory = max(bull_memory - 1, 0)
-            if bear_cross: bear_memory = 2
-            else: bear_memory = max(bear_memory - 1, 0)
+            # Gestione memoria segnali
+            if bull_cross:
+                bull_memory = 2
+            else:
+                bull_memory = max(bull_memory - 1, 0)
+
+            if bear_cross:
+                bear_memory = 2
+            else:
+                bear_memory = max(bear_memory - 1, 0)
 
             # Reverse close
             if side == "Buy" and bear_cross:
-                log("🔄 Reverse Close LONG → Bear signal")
+                log("🔄 REVERSE CLOSE: Bear signal → closing Long")
                 close_position(side, qty, price)
+                side = None
             elif side == "Sell" and bull_cross:
-                log("🔄 Reverse Close SHORT → Bull signal")
+                log("🔄 REVERSE CLOSE: Bull signal → closing Short")
                 close_position(side, qty, price)
+                side = None
 
-            # Entry
+            # Entry nuova posizione
             if side is None:
-                if bull_memory > 0 and price > ema + 1:
+                if bull_memory > 0 and price > ema:
                     log(f"📈 ENTRY LONG at {price:.2f}")
                     open_position("Buy", price)
                     bull_memory = 0
-                elif bear_memory > 0 and price < ema - 1:
+                elif bear_memory > 0 and price < ema:
                     log(f"📉 ENTRY SHORT at {price:.2f}")
                     open_position("Sell", price)
                     bear_memory = 0
 
-            log(f"Status → Price:{price:.2f} | BullMem:{bull_memory} | BearMem:{bear_memory} | Position:{side}")
+            log(f"Check done | Price: {price:.2f} | EMA: {ema:.2f} | BullMem:{bull_memory} | BearMem:{bear_memory} | Position: {side}")
 
         except Exception as e:
-            log(f"✗ Critical error: {e}")
+            log(f"✗ Critical error in loop: {e}")
             time.sleep(30)
