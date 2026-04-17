@@ -1,5 +1,5 @@
-requests
-pandas>=2.2.2
-pandas-ta
-pybit
 
+requests
+pandas>=2.2.0
+pybit>=5.0.0
+websocket-client
