@@ -8,8 +8,8 @@ from datetime import datetime, UTC, timedelta
 from pybit.unified_trading import HTTP
 
 # ====================== CONFIGURAZIONE CHIAVI ======================
-API_KEY = os.getenv('BYBIT_API_KEY')
-API_SECRET = os.getenv('BYBIT_API_SECRET')
+API_KEY = os.getenv('API_KEY')
+API_SECRET = os.getenv('API_SECRET')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
