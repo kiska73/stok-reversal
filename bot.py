@@ -26,8 +26,8 @@ EMA_LEN          = 10
 SLACK            = 0.35
 DIST_MIN         = 0.5
 
-TP_PERCENT       = 8.4
-SL_PERCENT       = 2.2
+TP_PERCENT       = 8.5
+SL_PERCENT       = 2
 
 LIMIT_BUFFER     = 0.0010
 TESTNET          = False 
