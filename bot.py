@@ -7,47 +7,53 @@ import sys
 from datetime import datetime, UTC, timedelta
 from pybit.unified_trading import HTTP
 
-# ====================== CONFIG ======================
-# Render ENV:
-# BYBIT_API_KEY
-# BYBIT_API_SECRET
-# TELEGRAM_TOKEN
-# TELEGRAM_CHAT_ID
+# =====================================================
+# CONFIG
+# =====================================================
 
-API_KEY = os.getenv("BYBIT_API_KEY")
-API_SECRET = os.getenv("BYBIT_API_SECRET")
+# Supporta sia vecchi nomi che nuovi nomi ENV
+API_KEY = os.getenv("BYBIT_API_KEY") or os.getenv("API_KEY")
+API_SECRET = os.getenv("BYBIT_API_SECRET") or os.getenv("API_SECRET")
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SYMBOL           = "ETHUSDT"
+SYMBOL = "ETHUSDT"
 ORDER_VALUE_USDT = 1000
-INTERVAL         = "30"
+INTERVAL = "30"
 
-RSI_LEN          = 14
-STOCH_LEN        = 14
-K_SMOOTH         = 21
-D_SMOOTH         = 27
-EMA_LEN          = 10
+RSI_LEN = 14
+STOCH_LEN = 14
+K_SMOOTH = 21
+D_SMOOTH = 27
+EMA_LEN = 10
 
-SLACK            = 0.35
-TP_PERCENT       = 8.5
-SL_PERCENT       = 2.0
-LIMIT_BUFFER     = 0.0010
+SLACK = 0.35
 
-TESTNET          = False
+TP_PERCENT = 8.5
+SL_PERCENT = 2.0
+
+LIMIT_BUFFER = 0.0010
+TESTNET = False
 
 bull_memory = 0
 bear_memory = 0
 
-# ====================== LOG ======================
+# =====================================================
+# LOG
+# =====================================================
 def log(msg):
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{ts} | {msg}", flush=True)
+    print(f"{ts} | {msg}")
+    sys.stdout.flush()
 
-# ====================== TELEGRAM ======================
+# =====================================================
+# TELEGRAM
+# =====================================================
 def telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
+
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -61,34 +67,45 @@ def telegram(msg):
     except:
         pass
 
-# ====================== CHECK ENV ======================
+# =====================================================
+# CHECK ENV
+# =====================================================
 if not API_KEY or not API_SECRET:
-    log("❌ Missing BYBIT_API_KEY / BYBIT_API_SECRET")
+    log("❌ Missing API Keys")
     sys.exit()
 
 log("✅ API Keys loaded")
 
-# ====================== SESSION ======================
+# =====================================================
+# BYBIT SESSION
+# =====================================================
 session = HTTP(
     testnet=TESTNET,
     api_key=API_KEY,
     api_secret=API_SECRET
 )
 
-# ====================== INSTRUMENT ======================
+# =====================================================
+# INSTRUMENT
+# =====================================================
 def get_instrument_info():
     try:
-        res = session.get_instruments_info(category="linear", symbol=SYMBOL)
+        res = session.get_instruments_info(
+            category="linear",
+            symbol=SYMBOL
+        )
+
         info = res["result"]["list"][0]
 
         tick = float(info["priceFilter"]["tickSize"])
         qty_step = float(info["lotSizeFilter"]["qtyStep"])
 
-        price_decimals = len(str(tick).split(".")[1].rstrip("0")) if "." in str(tick) else 0
-        qty_decimals = len(str(qty_step).split(".")[1].rstrip("0")) if "." in str(qty_step) else 0
+        price_dec = len(str(tick).split(".")[1].rstrip("0")) if "." in str(tick) else 0
+        qty_dec = len(str(qty_step).split(".")[1].rstrip("0")) if "." in str(qty_step) else 0
 
         log(f"✅ Instrument OK | Tick:{tick} QtyStep:{qty_step}")
-        return tick, qty_step, price_decimals, qty_decimals
+
+        return tick, qty_step, price_dec, qty_dec
 
     except Exception as e:
         log(f"❌ Instrument error: {e}")
@@ -96,7 +113,9 @@ def get_instrument_info():
 
 TICK_SIZE, QTY_STEP, PRICE_PRECISION, QTY_PRECISION = get_instrument_info()
 
-# ====================== INDICATORS ======================
+# =====================================================
+# INDICATORS
+# =====================================================
 def calculate_rsi(series, period=14):
     delta = series.diff()
 
@@ -104,6 +123,7 @@ def calculate_rsi(series, period=14):
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
 
     rs = gain / loss.replace(0, 1e-9)
+
     return 100 - (100 / (1 + rs))
 
 def calculate_stoch_rsi(df):
@@ -119,10 +139,12 @@ def calculate_stoch_rsi(df):
 
     return k, d
 
-# ====================== MARKET DATA ======================
+# =====================================================
+# MARKET DATA
+# =====================================================
 def get_market_data():
     try:
-        klines = session.get_kline(
+        res = session.get_kline(
             category="linear",
             symbol=SYMBOL,
             interval=INTERVAL,
@@ -130,7 +152,7 @@ def get_market_data():
         )
 
         df = pd.DataFrame(
-            klines["result"]["list"],
+            res["result"]["list"],
             columns=["ts","open","high","low","close","vol","turnover"]
         )
 
@@ -144,13 +166,11 @@ def get_market_data():
         prev = df.iloc[-3]
 
         bull_cross = (
-            prev["k"] <= prev["d"] + SLACK
-            and curr["k"] > curr["d"]
+            prev["k"] <= prev["d"] + SLACK and curr["k"] > curr["d"]
         )
 
         bear_cross = (
-            prev["k"] >= prev["d"] - SLACK
-            and curr["k"] < curr["d"]
+            prev["k"] >= prev["d"] - SLACK and curr["k"] < curr["d"]
         )
 
         log(
@@ -166,10 +186,15 @@ def get_market_data():
         log(f"❌ Market error: {e}")
         return False, False, 0, 0
 
-# ====================== POSITION ======================
+# =====================================================
+# POSITION
+# =====================================================
 def get_position():
     try:
-        res = session.get_positions(category="linear", symbol=SYMBOL)
+        res = session.get_positions(
+            category="linear",
+            symbol=SYMBOL
+        )
 
         for p in res["result"]["list"]:
             size = float(p.get("size", 0))
@@ -182,7 +207,9 @@ def get_position():
         log(f"❌ Position error: {e}")
         return None, 0, 0
 
-# ====================== HELPERS ======================
+# =====================================================
+# HELPERS
+# =====================================================
 def round_tick(price):
     return round(price / TICK_SIZE) * TICK_SIZE
 
@@ -193,11 +220,16 @@ def calculate_qty(price):
 
 def cancel_all():
     try:
-        session.cancel_all_orders(category="linear", symbol=SYMBOL)
+        session.cancel_all_orders(
+            category="linear",
+            symbol=SYMBOL
+        )
     except:
         pass
 
-# ====================== OPEN ======================
+# =====================================================
+# OPEN
+# =====================================================
 def open_position(side, price):
     qty = calculate_qty(price)
 
@@ -228,12 +260,7 @@ def open_position(side, price):
         )
 
         log(f"🚀 OPEN {side} @ {entry}")
-        telegram(
-            f"🚀 *OPEN {side}*\n"
-            f"Price: {entry}\n"
-            f"TP: {tp}\n"
-            f"SL: {sl}"
-        )
+        telegram(f"🚀 OPEN {side} @ {entry}")
 
         return True
 
@@ -241,7 +268,9 @@ def open_position(side, price):
         log(f"❌ Open error: {e}")
         return False
 
-# ====================== CLOSE ======================
+# =====================================================
+# CLOSE
+# =====================================================
 def close_position(side, qty):
     close_side = "Sell" if side == "Buy" else "Buy"
 
@@ -264,7 +293,9 @@ def close_position(side, qty):
     except Exception as e:
         log(f"❌ Close error: {e}")
 
-# ====================== TIMER ======================
+# =====================================================
+# TIMER
+# =====================================================
 def wait_next_candle():
     while True:
         now = datetime.now(UTC)
@@ -272,25 +303,35 @@ def wait_next_candle():
         next_min = ((now.minute // 30) + 1) * 30
 
         if next_min == 60:
-            next_candle = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            next_candle = now.replace(
+                minute=0,
+                second=0,
+                microsecond=0
+            ) + timedelta(hours=1)
         else:
-            next_candle = now.replace(minute=next_min, second=0, microsecond=0)
+            next_candle = now.replace(
+                minute=next_min,
+                second=0,
+                microsecond=0
+            )
 
         wait = (next_candle - now).total_seconds() + 25
 
         log(f"⏳ Waiting next candle ({int(wait)} sec)")
 
         while wait > 0:
-            sleep_chunk = min(300, wait)
-            time.sleep(sleep_chunk)
-            wait -= sleep_chunk
+            chunk = min(300, wait)
+            time.sleep(chunk)
+            wait -= chunk
 
             if wait > 60:
                 log(f"⏰ Alive | {int(wait)} sec remaining")
 
         return
 
-# ====================== MAIN ======================
+# =====================================================
+# MAIN
+# =====================================================
 if __name__ == "__main__":
 
     log("===== BOT STARTED =====")
@@ -307,42 +348,42 @@ if __name__ == "__main__":
 
             side, qty, avg = get_position()
 
-            # MEMORY
             if bull_cross:
                 bull_memory = 4
                 log("🔵 Bull cross")
-
             else:
                 bull_memory = max(0, bull_memory - 1)
 
             if bear_cross:
                 bear_memory = 4
                 log("🔴 Bear cross")
-
             else:
                 bear_memory = max(0, bear_memory - 1)
 
-            # REVERSE CLOSE
             if side == "Buy" and bear_cross:
                 close_position(side, qty)
+                side = None
 
             elif side == "Sell" and bull_cross:
                 close_position(side, qty)
+                side = None
 
-            # ENTRY
             if side is None:
 
                 if bull_memory > 0 and price > ema * 0.999:
-                    open_position("Buy", price)
-                    bull_memory = 0
+                    if open_position("Buy", price):
+                        bull_memory = 0
 
                 elif bear_memory > 0 and price < ema * 1.001:
-                    open_position("Sell", price)
-                    bear_memory = 0
+                    if open_position("Sell", price):
+                        bear_memory = 0
 
             log(
-                f"Status | Price:{price:.2f} EMA:{ema:.2f} "
-                f"BullMem:{bull_memory} BearMem:{bear_memory} Pos:{side}"
+                f"Status | Price:{price:.2f} "
+                f"EMA:{ema:.2f} "
+                f"BullMem:{bull_memory} "
+                f"BearMem:{bear_memory} "
+                f"Pos:{side}"
             )
 
         except Exception as e:
