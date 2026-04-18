@@ -17,10 +17,10 @@ SYMBOL           = "ETHUSDT"
 ORDER_VALUE_USDT = 1000
 INTERVAL         = "30"
 
-RSI_LEN          = 30
-STOCH_LEN        = 30
-K_SMOOTH         = 27
-D_SMOOTH         = 26
+RSI_LEN          = 14
+STOCH_LEN        = 14
+K_SMOOTH         = 21
+D_SMOOTH         = 27
 EMA_LEN          = 10
 
 SLACK            = 0.35
