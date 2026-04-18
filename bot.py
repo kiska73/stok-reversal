@@ -28,7 +28,7 @@ RSI_LEN, STOCH_LEN, K_SMOOTH, D_SMOOTH, EMA_LEN = 14, 14, 21, 27, 10
 SLACK, TP_PERCENT, SL_PERCENT = 0.35, 8.5, 2
 
 # MODIFICATO: Buffer ridotto allo 0,02% (0.0002)
-LIMIT_BUFFER     = 0.0002 
+LIMIT_BUFFER     = 0.0001 
 TESTNET          = False 
 
 session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
