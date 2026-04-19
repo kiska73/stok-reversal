@@ -27,7 +27,6 @@ INTERVAL         = "30"
 RSI_LEN, STOCH_LEN, K_SMOOTH, D_SMOOTH, EMA_LEN = 14, 14, 21, 27, 10
 SLACK, TP_PERCENT, SL_PERCENT = 0.35, 8.5, 2
 
-# MODIFICATO: Buffer ridotto allo 0,02% (0.0002)
 LIMIT_BUFFER     = 0.0001 
 TESTNET          = False 
 
@@ -96,23 +95,56 @@ def place_trade(side, price):
     qty = max(math.floor((ORDER_VALUE_USDT / price) / QTY_STEP) * QTY_STEP, QTY_STEP)
     is_buy = (side == "Buy")
     
-    # Prezzo di entrata molto più vicino al prezzo attuale
+    # Calcolo prezzi
     entry = round(price * (1 - LIMIT_BUFFER if is_buy else 1 + LIMIT_BUFFER) / TICK_SIZE) * TICK_SIZE
     tp = round(entry * (1 + TP_PERCENT/100 if is_buy else 1 - TP_PERCENT/100) / TICK_SIZE) * TICK_SIZE
     sl = round(entry * (1 - SL_PERCENT/100 if is_buy else 1 + SL_PERCENT/100) / TICK_SIZE) * TICK_SIZE
     
     try:
+        # Pulisce ordini precedenti
         session.cancel_all_orders(category="linear", symbol=SYMBOL)
         time.sleep(0.5)
-        session.place_order(
+        
+        # 1. Piazza Ordine LIMIT
+        resp = session.place_order(
             category="linear", symbol=SYMBOL, side=side, orderType="Limit",
             qty=f"{qty:.{QTY_PRECISION}f}", price=f"{entry:.{PRICE_PRECISION}f}",
             takeProfit=f"{tp:.{PRICE_PRECISION}f}", stopLoss=f"{sl:.{PRICE_PRECISION}f}",
             positionIdx=0, timeInForce="GTC"
         )
-        log(f"🚀 ENTRY {side} @ {entry} (Buffer 0.02%)")
-        telegram(f"🚀 **ENTRY {side}** @ {entry:.2f}")
-    except Exception as e: log(f"✗ Errore Ordine: {e}")
+        order_id = resp["result"]["orderId"]
+        log(f"⏳ LIMIT {side} @ {entry}. Monitoraggio 3 min...")
+
+        # 2. Loop di controllo (Timeout 180s)
+        start_time = time.time()
+        is_filled = False
+        
+        while time.time() - start_time < 180:
+            check = session.get_open_orders(category="linear", symbol=SYMBOL, orderId=order_id)
+            if not check["result"]["list"]:
+                is_filled = True
+                break
+            time.sleep(10)
+
+        # 3. Gestione mancato riempimento
+        if not is_filled:
+            log("⚠️ Ordine non fillato. Switch a MARKET...")
+            session.cancel_order(category="linear", symbol=SYMBOL, orderId=order_id)
+            
+            session.place_order(
+                category="linear", symbol=SYMBOL, side=side, orderType="Market",
+                qty=f"{qty:.{QTY_PRECISION}f}",
+                takeProfit=f"{tp:.{PRICE_PRECISION}f}", stopLoss=f"{sl:.{PRICE_PRECISION}f}",
+                positionIdx=0
+            )
+            log(f"🚀 ENTRY MARKET {side} eseguita.")
+            telegram(f"⚡ **MARKET ENTRY {side}** (Limit scaduto)")
+        else:
+            log(f"✅ LIMIT {side} eseguito con successo.")
+            telegram(f"🎯 **LIMIT FILL {side}** @ {entry}")
+
+    except Exception as e: 
+        log(f"✗ Errore Ordine: {e}")
 
 def check_startup_signal():
     global bull_memory, bear_memory
@@ -150,6 +182,7 @@ if __name__ == "__main__":
     while True:
         try:
             now = datetime.now(UTC)
+            # Calcolo attesa per la prossima candela da 30m (+15s di tolleranza)
             wait = (30 - (now.minute % 30)) * 60 - now.second + 15
             log(f"⏳ Prossimo check tra {int(wait)}s")
             time.sleep(max(wait, 10))
@@ -168,11 +201,15 @@ if __name__ == "__main__":
             if bear_cross: bear_memory = 4
             else: bear_memory = max(bear_memory - 1, 0)
 
+            # Chiusura posizione su segnale opposto (Reversal)
             if (side == "Buy" and bear_cross) or (side == "Sell" and bull_cross):
+                log(f"🔄 Segnale opposto rilevato! Chiusura {side}...")
                 session.place_order(category="linear", symbol=SYMBOL, side="Sell" if side=="Buy" else "Buy",
                                    orderType="Market", qty=f"{qty:.{QTY_PRECISION}f}", reduceOnly=True, positionIdx=0)
                 side = None
+                time.sleep(1)
 
+            # Apertura nuova posizione
             if side is None:
                 if bull_memory > 0 and price > ema * 0.999:
                     place_trade("Buy", price)
@@ -180,6 +217,7 @@ if __name__ == "__main__":
                 elif bear_memory > 0 and price < ema * 1.001:
                     place_trade("Sell", price)
                     bear_memory = 0
+            
             log(f"Monitor → Price:{price:.2f} | K:{curr['k']:.1f} D:{curr['d']:.1f} | Pos:{side}")
         except Exception as e:
             log(f"Loop error: {e}")
