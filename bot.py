@@ -17,8 +17,6 @@ print("=== DIAGNOSI AVVIO BOT ===")
 if not API_KEY or not API_SECRET:
     print("❌ ERRORE CRITICO: Variabili d'ambiente mancanti!")
     sys.exit(1)
-else:
-    print(f"✅ API Key caricate (Inizio: {API_KEY[:5]}...)")
 
 # ====================== PARAMETRI TRADING ======================
 SYMBOL           = "ETHUSDT"
@@ -26,8 +24,6 @@ ORDER_VALUE_USDT = 1000
 INTERVAL         = "30"
 RSI_LEN, STOCH_LEN, K_SMOOTH, D_SMOOTH, EMA_LEN = 14, 14, 21, 27, 10
 SLACK, TP_PERCENT, SL_PERCENT = 0.35, 8.5, 2
-
-# Buffer dello 0.01% rispetto al prezzo attuale real-time
 LIMIT_BUFFER     = 0.0001 
 TESTNET          = False 
 
@@ -43,8 +39,11 @@ def telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-    except: pass
+        # Aggiunto emoji e formattazione per visibilità
+        text = f"🤖 **BOT ETH:**\n{msg}"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
+    except Exception as e:
+        print(f"Errore invio Telegram: {e}")
 
 def get_instrument_info():
     try:
@@ -93,16 +92,13 @@ def get_position():
     except: return None, 0.0, 0.0
 
 def place_trade(side):
-    """Calcola l'entrata basandosi sul prezzo attuale reale, non sulla candela passata"""
     try:
-        # Recupero prezzo real-time
         ticker = session.get_tickers(category="linear", symbol=SYMBOL)
         current_price = float(ticker["result"]["list"][0]["lastPrice"])
         
         qty = max(math.floor((ORDER_VALUE_USDT / current_price) / QTY_STEP) * QTY_STEP, QTY_STEP)
         is_buy = (side == "Buy")
         
-        # Calcolo prezzi basati su current_price
         entry = round(current_price * (1 - LIMIT_BUFFER if is_buy else 1 + LIMIT_BUFFER) / TICK_SIZE) * TICK_SIZE
         tp = round(entry * (1 + TP_PERCENT/100 if is_buy else 1 - TP_PERCENT/100) / TICK_SIZE) * TICK_SIZE
         sl = round(entry * (1 - SL_PERCENT/100 if is_buy else 1 + SL_PERCENT/100) / TICK_SIZE) * TICK_SIZE
@@ -110,7 +106,7 @@ def place_trade(side):
         session.cancel_all_orders(category="linear", symbol=SYMBOL)
         time.sleep(0.5)
         
-        # 1. Piazza Ordine LIMIT
+        # 1. LIMIT
         resp = session.place_order(
             category="linear", symbol=SYMBOL, side=side, orderType="Limit",
             qty=f"{qty:.{QTY_PRECISION}f}", price=f"{entry:.{PRICE_PRECISION}f}",
@@ -118,9 +114,9 @@ def place_trade(side):
             positionIdx=0, timeInForce="GTC"
         )
         order_id = resp["result"]["orderId"]
-        log(f"⏳ LIMIT {side} @ {entry} (Prezzo spot: {current_price}). Monitoraggio 3 min...")
+        log(f"⏳ LIMIT {side} @ {entry}. Monitoraggio 3 min...")
+        telegram(f"⏳ Inserito ordine LIMIT **{side}** @ {entry}\n_(Prezzo spot: {current_price})_")
 
-        # 2. Loop di controllo (Timeout 180s)
         start_time = time.time()
         is_filled = False
         while time.time() - start_time < 180:
@@ -128,40 +124,35 @@ def place_trade(side):
             if not check["result"]["list"]:
                 is_filled = True
                 break
-            time.sleep(10)
+            time.sleep(15)
 
-        # 3. Gestione mancato riempimento -> MARKET
+        # 2. SE NON FILLATO -> MARKET
         if not is_filled:
-            log("⚠️ Ordine non fillato. Switch a MARKET...")
             session.cancel_order(category="linear", symbol=SYMBOL, orderId=order_id)
-            
             session.place_order(
                 category="linear", symbol=SYMBOL, side=side, orderType="Market",
                 qty=f"{qty:.{QTY_PRECISION}f}",
                 takeProfit=f"{tp:.{PRICE_PRECISION}f}", stopLoss=f"{sl:.{PRICE_PRECISION}f}",
                 positionIdx=0
             )
-            log(f"🚀 ENTRY MARKET {side} eseguita.")
-            telegram(f"⚡ **MARKET ENTRY {side}** (Limit {entry} scaduto)")
+            telegram(f"⚡ LIMIT scaduto. Entrato a **MARKET {side}**")
         else:
-            log(f"✅ LIMIT {side} eseguito con successo.")
-            telegram(f"🎯 **LIMIT FILL {side}** @ {entry}")
+            telegram(f"🎯 Ordine **{side}** eseguito con successo (Limit fill).")
 
     except Exception as e: 
-        log(f"✗ Errore in place_trade: {e}")
+        log(f"✗ Errore: {e}")
+        telegram(f"❌ Errore durante l'ordine: {e}")
 
 def check_startup_signal():
     global bull_memory, bear_memory
-    log("🔍 Analisi segnali recenti per avvio immediato...")
+    log("🔍 Analisi avvio...")
     df = get_market_data()
     if df is None: return
 
     for i in range(-5, -1):
         curr = df.iloc[i]; prev = df.iloc[i-1]
-        bull_c = (prev["k"] <= prev["d"] + SLACK) and (curr["k"] > curr["d"])
-        bear_c = (prev["k"] >= prev["d"] - SLACK) and (curr["k"] < curr["d"])
-        if bull_c: bull_memory = 4
-        elif bear_c: bear_memory = 4
+        if (prev["k"] <= prev["d"] + SLACK) and (curr["k"] > curr["d"]): bull_memory = 4
+        elif (prev["k"] >= prev["d"] - SLACK) and (curr["k"] < curr["d"]): bear_memory = 4
         else:
             bull_memory = max(bull_memory - 1, 0)
             bear_memory = max(bear_memory - 1, 0)
@@ -171,18 +162,13 @@ def check_startup_signal():
     ema = float(last_close["ema"])
     side, _, _ = get_position()
 
-    if side is None:
-        if bull_memory > 0 and price > ema * 0.999:
-            place_trade("Buy")
-            bull_memory = 0
-        elif bear_memory > 0 and price < ema * 1.001:
-            place_trade("Sell")
-            bear_memory = 0
-    log(f"Diagnosi completata. BullMem: {bull_memory} | BearMem: {bear_memory}")
+    status_msg = f"✅ Bot Avviato!\nPosizione attuale: {side if side else 'Nessuna'}\nBullMem: {bull_memory} | BearMem: {bear_memory}"
+    telegram(status_msg)
 
 if __name__ == "__main__":
     log("=== BOT ETH REVERSAL ATTIVO ===")
     check_startup_signal()
+    
     while True:
         try:
             now = datetime.now(UTC)
@@ -193,36 +179,43 @@ if __name__ == "__main__":
             df = get_market_data()
             if df is None: continue
             curr, prev = df.iloc[-2], df.iloc[-3]
-            price_candle = float(curr["close"])
-            ema = float(curr["ema"])
+            price_candle, ema = float(curr["close"]), float(curr["ema"])
             
             bull_cross = (prev["k"] <= prev["d"] + SLACK) and (curr["k"] > curr["d"])
             bear_cross = (prev["k"] >= prev["d"] - SLACK) and (curr["k"] < curr["d"])
-            side, qty, _ = get_position()
+            side, qty, avg_price = get_position()
 
-            if bull_cross: bull_memory = 4
+            if bull_cross: 
+                bull_memory = 4
+                telegram("📈 Segnale **Bullish Cross** rilevato!")
             else: bull_memory = max(bull_memory - 1, 0)
-            if bear_cross: bear_memory = 4
+            
+            if bear_cross: 
+                bear_memory = 4
+                telegram("📉 Segnale **Bearish Cross** rilevato!")
             else: bear_memory = max(bear_memory - 1, 0)
 
-            # Reversal Logic
+            # Reversal
             if (side == "Buy" and bear_cross) or (side == "Sell" and bull_cross):
-                log(f"🔄 Reversal rilevato! Chiusura {side}...")
+                telegram(f"🔄 Reversal! Chiudo posizione **{side}** a mercato.")
                 session.place_order(category="linear", symbol=SYMBOL, side="Sell" if side=="Buy" else "Buy",
                                    orderType="Market", qty=f"{qty:.{QTY_PRECISION}f}", reduceOnly=True, positionIdx=0)
                 side = None
-                time.sleep(1)
+                time.sleep(2)
 
-            # Apertura nuova posizione
+            # Apertura
             if side is None:
                 if bull_memory > 0 and price_candle > ema * 0.999:
+                    telegram("🚀 Condizioni BUY soddisfatte. Provo entrata...")
                     place_trade("Buy")
                     bull_memory = 0
                 elif bear_memory > 0 and price_candle < ema * 1.001:
+                    telegram("🚀 Condizioni SELL soddisfatte. Provo entrata...")
                     place_trade("Sell")
                     bear_memory = 0
             
-            log(f"Monitor → Price:{price_candle:.2f} | K:{curr['k']:.1f} D:{curr['d']:.1f} | Pos:{side}")
+            log(f"Monitor → Price:{price_candle:.2f} | K:{curr['k']:.1f} | Pos:{side}")
         except Exception as e:
             log(f"Loop error: {e}")
+            telegram(f"⚠️ Errore nel ciclo principale: {e}")
             time.sleep(30)
